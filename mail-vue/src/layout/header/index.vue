@@ -405,6 +405,7 @@ onBeforeUnmount(() => {
   gap: 10px;
   grid-template-columns: auto 1fr;
   position: relative;
+  padding-right: 8px;
 }
 
 @media (max-width: 767px) {
@@ -461,7 +462,7 @@ onBeforeUnmount(() => {
 
 .breadcrumb-item {
   font-weight: bold;
-  font-size: 14px;
+  font-size: 16px;
   color: var(--el-text-color-primary);
   overflow: hidden;
   white-space: nowrap;
@@ -499,15 +500,15 @@ onBeforeUnmount(() => {
 
     .avatar-text {
       box-sizing: border-box;
-      background: var(--el-bg-color);
-      color: var(--el-text-color-primary);
-      height: 32px;
-      width: 32px;
+      background: var(--mail-sidebar-active);
+      color: var(--mail-sidebar-active-text);
+      height: 36px;
+      width: 36px;
       display: flex;
       justify-content: center;
       align-items: center;
-      border-radius: 8px;
-      border: 1px solid var(--dark-border);
+      border-radius: 50%;
+      border: 1px solid var(--mail-card-border);
     }
 
     .setting-icon {

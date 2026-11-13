@@ -983,6 +983,7 @@ function renderHighlight(value) {
   color: var(--el-text-color-primary);
   overflow: hidden;
   height: 100%;
+  min-width: 0;
 }
 
 .scroll {
@@ -1295,6 +1296,7 @@ function renderHighlight(value) {
 
   &:hover {
     background-color: var(--email-hover-background);
+    box-shadow: 0 2px 7px rgba(35, 55, 80, .12);
     z-index: 0;
   }
 

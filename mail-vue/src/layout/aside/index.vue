@@ -9,7 +9,7 @@
         <Icon icon="hugeicons:quill-write-01" width="22" height="22" />
         <span>{{ $t('compose') }}</span>
       </button>
-      <el-menu :collapse="false" text-color="#fff" active-text-color="#fff" style="margin-top: 6px">
+      <el-menu :collapse="false" style="margin-top: 6px">
         <el-menu-item @click="router.push({name: 'email'})" index="email"
                       :class="route.meta.name === 'email' ? 'choose-item' : ''">
           <Icon icon="hugeicons:mailbox-01" width="20" height="20" />
@@ -114,7 +114,7 @@ function openCompose() {
   align-items: center;
   justify-content: flex-start;
   gap: 10px;
-  color: #ffffff;
+  color: var(--mail-sidebar-text);
   transition: all 0.3s ease;
   max-width: 240px;
   padding: 0 10px;
@@ -151,24 +151,27 @@ function openCompose() {
 .compose-bar {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
   width: calc(100% - 24px);
-  height: 42px;
+  height: 48px;
   margin-right: 12px;
   margin-left: 12px;
   margin-bottom: 15px;
   border: 0;
-  border-radius: 8px;
-  background: #1890ff;
-  color: #ffffff;
+  padding: 0 18px;
+  border-radius: 14px;
+  background: var(--mail-sidebar-active);
+  color: var(--mail-sidebar-active-text);
   font-family: inherit;
-  font-size: 15px;
+  font-size: 14px;
+  font-weight: 600;
   line-height: 1;
   cursor: pointer;
 
   &:hover {
-    background: #1064c0;
+    filter: brightness(.97);
+    box-shadow: 0 3px 10px rgba(35, 75, 125, .12);
   }
 
   @media (max-width: 767px) {
@@ -179,25 +182,30 @@ function openCompose() {
 .manage-title {
   margin-top: 12px;
   padding-left: 20px;
-  color: #fff;
+  color: var(--mail-sidebar-text);
+  opacity: .7;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .el-menu-item {
   margin: 3px 12px !important;
-  border-radius: 6px;
-  height: 36px;
-  padding: 10px !important;
+  border-radius: 10px;
+  height: 40px;
+  padding: 10px 14px !important;
+  color: var(--mail-sidebar-text) !important;
 }
 
 .choose-item {
-  font-weight: 400;
-  background: var(--aside-menu-active-background) !important;
+  font-weight: 600;
+  color: var(--mail-sidebar-active-text) !important;
+  background: var(--mail-sidebar-active) !important;
   backdrop-filter: blur(4px);
 }
 
 @media (hover: hover) {
   .el-menu-item:hover {
-    background: rgba(255, 255, 255, 0.08) !important;
+    background: var(--mail-sidebar-hover) !important;
   }
 }
 
@@ -207,15 +215,15 @@ function openCompose() {
 
 
 :deep(.el-scrollbar__wrap--hidden-default ) {
-  background: var(--aside-backgound) !important;
+  background: var(--mail-sidebar) !important;
 }
 
 :deep(.el-menu-item) {
-  background: var(--aside-backgound);
+  background: var(--mail-sidebar);
 }
 
 :deep(.el-menu) {
-  background: var(--aside-backgound);
+  background: var(--mail-sidebar);
 }
 
 .el-menu {

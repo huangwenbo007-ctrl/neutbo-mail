@@ -1,5 +1,11 @@
 const en = {
     inbox: 'Inbox',
+    mailWelcomeLabel: 'YOUR PERSONAL MAILBOX',
+    mailWelcomeTitle: 'A little more room for connection.',
+    mailWelcomeDescription: 'Receive, organize and send your important messages in one clear space.',
+    mailSignInTitle: 'Welcome back',
+    mailRegisterTitle: 'Create your mailbox',
+    externalEmailHint: 'Existing email (e.g. Gmail)',
     compose: 'Compose',
     drafts: 'Drafts',
     sent: 'Sent',

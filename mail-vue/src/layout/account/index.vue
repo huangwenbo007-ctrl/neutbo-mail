@@ -552,7 +552,7 @@ path[fill="#ffdda1"] {
 <style scoped lang="scss">
 .account-box {
 
-  border-right: 1px solid var(--el-border-color) !important;
+  border-right: 1px solid var(--mail-card-border) !important;
   background-color: var(--el-bg-color);
   height: 100%;
   overflow: hidden;
@@ -613,8 +613,10 @@ path[fill="#ffdda1"] {
 
   .item {
     background-color: var(--el-bg-color);
-    border-radius: 8px;
-    padding: 10px;
+    border-radius: 12px;
+    padding: 12px;
+    border: 1px solid var(--mail-card-border);
+    box-shadow: none;
     margin-bottom: 11px;
     margin-left: 10px;
     margin-right: 10px;
@@ -623,7 +625,7 @@ path[fill="#ffdda1"] {
     .account {
       font-weight: 400;
       font-size: 15px;
-      margin-bottom: 20px;
+      margin-bottom: 14px;
       overflow: hidden;
       white-space: nowrap;
       text-overflow: ellipsis;
@@ -657,7 +659,8 @@ path[fill="#ffdda1"] {
   }
 
   .item-choose {
-    background: var(--choose-account-background);
+    background: var(--mail-account-active);
+    border-color: transparent;
   }
 }
 

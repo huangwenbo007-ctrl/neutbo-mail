@@ -1,5 +1,11 @@
 const zh = {
     inbox: '收件箱',
+    mailWelcomeLabel: '你的个人邮箱',
+    mailWelcomeTitle: '让每一封邮件，都有温度。',
+    mailWelcomeDescription: '在一个清爽的空间里，收取、整理和发送重要的消息。',
+    mailSignInTitle: '欢迎回来',
+    mailRegisterTitle: '创建你的邮箱',
+    externalEmailHint: '已有邮箱（如 163、Gmail 或 QQ）',
     compose: '撰写邮件',
     drafts: '草稿箱',
     sent: '已发送',
