@@ -3,6 +3,15 @@ main = "src/index.js"
 compatibility_date = "2025-06-04"
 keep_vars = true
 
+[[d1_databases]]
+binding = "db"
+database_name = "neutbo-mail"
+database_id = "d781c914-ad12-40c1-8827-00fa7aad90d6"
+
+[[kv_namespaces]]
+binding = "kv"
+id = "7b6249407976443188547a3589a1de4f"
+
 [observability]
 enabled = true
 
