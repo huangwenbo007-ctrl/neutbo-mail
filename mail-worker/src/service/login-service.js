@@ -19,6 +19,7 @@ import dayjs from 'dayjs';
 import { toUtc } from '../utils/date-uitil';
 import { t } from '../i18n/i18n.js';
 import verifyRecordService from './verify-record-service';
+import registrationEmailService from './registration-email-service';
 
 const loginService = {
 
@@ -127,6 +128,7 @@ const loginService = {
 		}
 
 		const { salt, hash } = await saltHashUtils.hashPassword(password);
+		await registrationEmailService.consume(c, params);
 
 		let consumedCode = null
 		const usingRegKey = regKey !== settingConst.regKey.CLOSE && type
