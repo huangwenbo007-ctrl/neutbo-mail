@@ -41,8 +41,10 @@ export default {
 		if (setting.register === 1) throw new BizError('注册已关闭');
 		const domains = Array.isArray(c.env.domain) ? c.env.domain : JSON.parse(c.env.domain);
 		const email = externalEmail(params.externalEmail, domains);
-		const senderDomain = domains.find(domain => setting.resendTokens[domain]);
-		if (!senderDomain || !c.env.jwt_secret) throw new BizError('邮箱验证服务尚未配置');
+		// A dedicated secret supports first-time setup before an administrator can register.
+		const senderDomain = c.env.registration_resend_token ? domains[0] : domains.find(domain => setting.resendTokens[domain]);
+		const resendToken = c.env.registration_resend_token || setting.resendTokens[senderDomain];
+		if (!senderDomain || !resendToken || !c.env.jwt_secret) throw new BizError('邮箱验证服务尚未配置');
 		const now = Math.floor(Date.now() / 1000);
 		const ip = c.req.header('CF-Connecting-IP');
 		if (!ip) throw new BizError('无法验证请求来源');
@@ -61,7 +63,7 @@ export default {
 		if (!row) throw new BizError('发送过于频繁，请等待60秒');
 		const code = randomCode();
 		await c.env.kv.put(prefix + challenge, await mac(c.env.jwt_secret, `code:${emailHash}:${challenge}:${code}`), {expirationTtl: ttl});
-		const resend = new Resend(setting.resendTokens[senderDomain]);
+		const resend = new Resend(resendToken);
 		const result = await resend.emails.send({from: `Neutbo Mail <no-reply@${senderDomain}>`, to: [email], subject: 'Neutbo Mail 注册验证码', text: `您的验证码是 ${code}，5分钟内有效。请勿将验证码告知他人。`});
 		if (result.error) throw new BizError('验证码发送失败，请稍后重试');
 		return {challenge};

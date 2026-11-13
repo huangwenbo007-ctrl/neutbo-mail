@@ -21,7 +21,9 @@ KV 只保存有过期时间的验证码 HMAC 摘要。D1 负责频率、尝试�
 
 `wrangler.toml` 的 `previews` 配置明确使用以上资源。预览不应绑定生产数据库 `neutbo-mail` 或 KV `neutbo-mail-kv`，也不要导入生产邮件触发器。多个分支预览共用这套测试存储，应串行测试。
 
-预览上线后仍需要在预览环境中单独配置 `jwt_secret`，初始化测试数据库，并在测试邮箱管理界面配置 Resend。不要把密钥提交到 GitHub 或粘贴到聊天中。发送地址默认采用已配置 Resend Token 的第一个域名下的 `no-reply@域名`，需要确认 Resend 已验证该域名且密钥允许发件。
+预览上线后仍需要在预览环境中单独配置 `jwt_secret`，并初始化测试数据库。首次安装尚无管理员时，可在预览的运行时密钥中添加 `registration_resend_token`，使验证码注册不依赖先登录管理界面配置 Resend。这个专用密钥只用于验证码；未设置时继续使用原管理界面的 Resend 配置。
+
+不要把密钥提交到 GitHub 或粘贴到聊天中。使用 `registration_resend_token` 时，发送地址为 `domain` 数组第一个域名下的 `no-reply@域名`；使用管理界面配置时，选择第一个已配置 Token 的域名。需要确认 Resend 已验证该域名且密钥允许发件。
 
 ## 发布前必做
 

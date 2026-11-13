@@ -5,6 +5,7 @@ const sent = vi.hoisted(() => []);
 vi.mock('resend', () => ({ Resend: class { emails = { send: async (msg) => { sent.push(msg); return { data: { id: 'test' }, error: null }; } }; } }));
 vi.mock('../src/service/setting-service', () => ({ default: { query: async () => ({ register: 0, resendTokens: { 'example.com': 'test' } }) } }));
 import verification from '../src/service/registration-email-service';
+import settingService from '../src/service/setting-service';
 
 let db, c, kv;
 beforeEach(() => {
@@ -16,7 +17,7 @@ beforeEach(() => {
   kv = new Map();
   c = { env: { domain: ['example.com'], jwt_secret: 'test secret', db: { prepare(sql) { return { bind(...args) { return { async first() { return db.prepare(sql).get(...args) || null; } }; } }; } }, kv: { async put(k,v) { kv.set(k,v); }, async get(k) { return kv.get(k); } } }, req: { header() { return '192.0.2.1'; } } };
 });
-afterEach(() => { db.close(); vi.useRealTimers(); });
+afterEach(() => { db.close(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 async function issue() {
   const { challenge } = await verification.send(c, { externalEmail: 'test@outside.com' });
@@ -25,6 +26,18 @@ async function issue() {
 }
 
 describe('registration email verification', () => {
+  it('supports initial setup using a dedicated Resend secret before an admin exists', async () => {
+    vi.spyOn(settingService, 'query').mockResolvedValueOnce({register:0,resendTokens:{}});
+    c.env.registration_resend_token = 'test-bootstrap-token';
+    const params = await issue();
+    expect(sent[0].from).toContain('no-reply@example.com');
+    await expect(verification.consume(c, params)).resolves.toBeUndefined();
+  });
+  it('fails closed without either form of Resend configuration', async () => {
+    vi.spyOn(settingService, 'query').mockResolvedValueOnce({register:0,resendTokens:{}});
+    await expect(issue()).rejects.toThrow();
+    expect(sent).toHaveLength(0);
+  });
   it('accepts a valid code once, including under concurrent requests', async () => {
     const params = await issue();
     const results = await Promise.allSettled([verification.consume(c, params), verification.consume(c, params)]);
