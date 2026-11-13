@@ -1,4 +1,4 @@
-name = "cloud-mail"
+name = "neutbo-mail"
 main = "src/index.js"
 compatibility_date = "2025-06-04"
 keep_vars = true
@@ -48,3 +48,19 @@ crons = ["0 * * * *"]	#每小时执行；resetDaySendCount 仅在 UTC 0 点生�
 
 [build]
 command = "pnpm --prefix ../mail-vue install && pnpm --prefix ../mail-vue run build"
+
+# Branch previews must never use production storage or email triggers.
+[previews.vars]
+domain = ["neutbo.com"]
+admin = "test-admin@neutbo.com"
+orm_log = false
+analysis_cache = false
+
+[[previews.d1_databases]]
+binding = "db"
+database_name = "neutbo-mail-verification-test"
+database_id = "2eebad0f-ffe7-4347-b55e-c9f74b7aad2c"
+
+[[previews.kv_namespaces]]
+binding = "kv"
+id = "f72aeaa4a60847c984160f99de6c4e1e"
