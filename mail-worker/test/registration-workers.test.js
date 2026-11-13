@@ -75,6 +75,18 @@ it('rejects mail provider errors without returning a usable challenge', async ()
   expect(result.data).toBeUndefined();
 });
 
+it.each([
+  [401, 'API key is invalid: re_private_test_value', 'Resend 密钥无效或未启用'],
+  [403, 'The example.com domain is not verified. Please, add and verify your domain.', '发信域名尚未通过 Resend 验证'],
+])('reports a safe diagnosis for provider status %s', async (status, message, expected) => {
+  fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(status,JSON.stringify({name:'validation_error',message}));
+  const result = await post('/register/email-code',{externalEmail:'receiver@external.test'});
+  expect(result.code).not.toBe(200);
+  expect(result.message).toContain(expected);
+  expect(result.message).not.toContain('re_private_test_value');
+  expect(result.data).toBeUndefined();
+});
+
 it('also requires email proof for first-time OAuth account binding', async () => {
   await env.db.prepare("INSERT INTO oauth (oauth_user_id,platform,user_id) VALUES ('test-oauth-user','github',0)").run();
   const params = {email:'oauth@example.com', oauthUserId:'test-oauth-user'};

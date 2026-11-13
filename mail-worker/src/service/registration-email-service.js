@@ -28,6 +28,23 @@ function randomCode() {
 	return String(value[0] % 1000000).padStart(6, '0');
 }
 
+function resendFailure(error) {
+	const message = String(error?.message || '').toLowerCase();
+	if (/api key.*(invalid|not active|suspended)|missing api key/.test(message) || error?.statusCode === 401) {
+		return ['invalid_key', '验证码发送失败：Resend 密钥无效或未启用'];
+	}
+	if (/domain.*not verified/.test(message)) {
+		return ['unverified_domain', '验证码发送失败：发信域名尚未通过 Resend 验证'];
+	}
+	if (/only send testing emails/.test(message)) {
+		return ['testing_restriction', '验证码发送失败：Resend 仍限制为测试收件人'];
+	}
+	if (/quota|rate limit|too many requests/.test(message) || error?.statusCode === 429) {
+		return ['provider_limit', '验证码发送失败：发信服务额度或频率受限'];
+	}
+	return ['provider_rejection', '验证码发送失败，请稍后重试'];
+}
+
 export default {
 	async cleanup(c) {
 		const cutoff = Math.floor(Date.now() / 1000) - 86400;
@@ -65,7 +82,12 @@ export default {
 		await c.env.kv.put(prefix + challenge, await mac(c.env.jwt_secret, `code:${emailHash}:${challenge}:${code}`), {expirationTtl: ttl});
 		const resend = new Resend(resendToken);
 		const result = await resend.emails.send({from: `Neutbo Mail <no-reply@${senderDomain}>`, to: [email], subject: 'Neutbo Mail 注册验证码', text: `您的验证码是 ${code}，5分钟内有效。请勿将验证码告知他人。`});
-		if (result.error) throw new BizError('验证码发送失败，请稍后重试');
+		if (result.error) {
+			const [reason, message] = resendFailure(result.error);
+			// Never log or return the provider's raw message: it can include account data.
+			console.warn('Registration email rejected by Resend', {reason});
+			throw new BizError(message);
+		}
 		return {challenge};
 	},
 

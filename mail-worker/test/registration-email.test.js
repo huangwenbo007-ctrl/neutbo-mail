@@ -26,6 +26,13 @@ async function issue() {
 }
 
 describe('registration email verification', () => {
+  it.each(['163.com', 'gmail.com', 'qq.com'])('accepts an existing external %s mailbox', async (domain) => {
+    const externalEmail = `receiver@${domain}`;
+    const {challenge} = await verification.send(c, {externalEmail});
+    const code = sent[0].text.match(/\b\d{6}\b/)[0];
+    expect(sent[0].to).toEqual([externalEmail]);
+    await expect(verification.consume(c, {externalEmail, emailChallenge:challenge, emailVerificationCode:code})).resolves.toBeUndefined();
+  });
   it('supports initial setup using a dedicated Resend secret before an admin exists', async () => {
     vi.spyOn(settingService, 'query').mockResolvedValueOnce({register:0,resendTokens:{}});
     c.env.registration_resend_token = 'test-bootstrap-token';
