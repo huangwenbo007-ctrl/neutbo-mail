@@ -33,6 +33,13 @@ const dbInit = {
 		await this.v3_2DB(c);
 		await this.v3_3DB(c);
 		await this.v3_4DB(c);
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS registration_email_verification (
+			email_hash TEXT PRIMARY KEY, challenge TEXT NOT NULL, sent_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, consumed INTEGER NOT NULL DEFAULT 0
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS registration_email_rate (
+			ip_hash TEXT PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL
+		)`).run();
 		await settingService.refresh(c);
 		return c.text('success');
 	},

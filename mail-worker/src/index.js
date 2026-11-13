@@ -6,6 +6,7 @@ import emailService from './service/email-service';
 import r2Service from './service/r2-service';
 import oauthService from './service/oauth-service';
 import analysisService from './service/analysis-service';
+import registrationEmailService from './service/registration-email-service';
 export default {
 	 async fetch(req, env, ctx) {
 
@@ -38,6 +39,7 @@ export default {
 		}
 
 		await verifyRecordService.clearRecord({ env })
+		await registrationEmailService.cleanup({ env })
 		await userService.resetDaySendCount({ env })
 		await emailService.completeReceiveAll({ env })
 		await emailService.autoClean({ env })

@@ -83,6 +83,10 @@
                     type="text" autocomplete="off" @keyup.enter="submitRegister"/>
           <el-input v-if="settingStore.settings.regKey === 2" v-model="registerForm.code"
                     :placeholder="$t('regKeyOptional')" type="text" autocomplete="off" @keyup.enter="submitRegister"/>
+          <el-input v-model="verification.externalEmail" placeholder="已有的外部邮箱（如 QQ 邮箱）" autocomplete="email"/>
+          <el-input v-model="verification.emailVerificationCode" placeholder="6 位邮箱验证码" maxlength="6" inputmode="numeric">
+            <template #append><el-button :disabled="sendCountdown > 0 || sendingCode" @click="sendCode">{{ sendCountdown ? `${sendCountdown} 秒后重发` : '发送验证码' }}</el-button></template>
+          </el-input>
           <div v-show="verifyShow"
                ref="turnstileContainer"
                :key="turnstileContainerKey"
@@ -141,6 +145,10 @@
                   type="text" autocomplete="off" @keyup.enter="bind"/>
         <el-input v-if="settingStore.settings.regKey === 2" v-model="bindForm.code"
                   :placeholder="$t('regKeyOptional')" type="text" autocomplete="off" @keyup.enter="bind"/>
+        <el-input v-model="verification.externalEmail" placeholder="已有的外部邮箱（如 QQ 邮箱）" autocomplete="email"/>
+        <el-input v-model="verification.emailVerificationCode" placeholder="6 位邮箱验证码" maxlength="6" inputmode="numeric">
+          <template #append><el-button :disabled="sendCountdown > 0 || sendingCode" @click="sendCode">{{ sendCountdown ? `${sendCountdown} 秒后重发` : '发送验证码' }}</el-button></template>
+        </el-input>
         <el-button class="btn" type="primary" @click="bind" :loading="bindLoading"
         >绑定
         </el-button>
@@ -155,9 +163,10 @@
 <script setup>
 import router from "@/router";
 import {useRoute} from "vue-router";
-import {computed, nextTick, reactive, ref} from "vue";
+import {computed, nextTick, onUnmounted, reactive, ref} from "vue";
 import {login} from "@/request/login.js";
 import {register} from "@/request/login.js";
+import {sendRegistrationCode} from "@/request/login.js";
 import {websiteConfig} from "@/request/setting.js";
 import {isEmail} from "@/utils/verify-utils.js";
 import {useSettingStore} from "@/store/setting.js";
@@ -183,6 +192,38 @@ const bindLoading = ref(false)
 const oauthLoading = ref(false);
 const showBindForm = ref(false);
 const show = ref('login')
+
+const verification = reactive({externalEmail: '', emailVerificationCode: '', emailChallenge: ''})
+const sendCountdown = ref(0)
+const sendingCode = ref(false)
+let countdownTimer
+let sentEmail = ''
+onUnmounted(() => clearInterval(countdownTimer))
+
+async function sendCode() {
+  const email = verification.externalEmail.trim().toLowerCase()
+  if (!isEmail(email)) { ElMessage.error('请输入有效的外部邮箱'); return }
+  sendingCode.value = true
+  verification.emailChallenge = ''
+  try {
+    const data = await sendRegistrationCode(email)
+    sentEmail = email
+    verification.emailChallenge = data.challenge
+    verification.emailVerificationCode = ''
+    sendCountdown.value = 60
+    clearInterval(countdownTimer)
+    countdownTimer = setInterval(() => { if (--sendCountdown.value <= 0) clearInterval(countdownTimer) }, 1000)
+    ElMessage.success('验证码已发送，请检查邮箱')
+  } finally { sendingCode.value = false }
+}
+
+function verificationParams() {
+  if (!verification.emailChallenge || verification.externalEmail.trim().toLowerCase() !== sentEmail || !/^\d{6}$/.test(verification.emailVerificationCode)) {
+    ElMessage.error('请先获取并输入当前外部邮箱的6位验证码')
+    return null
+  }
+  return { ...verification, externalEmail: sentEmail }
+}
 
 const oauthKeys = ['linuxdo', 'github', 'google']
 
@@ -413,7 +454,9 @@ function bind() {
 
   }
 
-  const form = {email, oauthUserId: bindForm.oauthUserId, code: bindForm.code}
+  const verify = verificationParams()
+  if (!verify) return
+  const form = {email, oauthUserId: bindForm.oauthUserId, code: bindForm.code, ...verify}
 
   bindLoading.value = true
   oauthBindUser(form).then(data => {
@@ -601,13 +644,16 @@ function submitRegister() {
     return;
   }
 
+  const verify = verificationParams()
+  if (!verify) return
   registerLoading.value = true
 
   const form = {
     email,
     password: registerForm.password,
     token: verifyToken,
-    code: registerForm.code
+    code: registerForm.code,
+    ...verify
   }
 
   register(form).then(({regVerifyOpen}) => {
@@ -616,6 +662,8 @@ function submitRegister() {
     registerForm.password = ''
     registerForm.confirmPassword = ''
     registerForm.code = ''
+    verification.emailChallenge = ''
+    verification.emailVerificationCode = ''
     registerLoading.value = false
     verifyToken = ''
     settingStore.settings.regVerifyOpen = regVerifyOpen
