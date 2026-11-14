@@ -148,6 +148,10 @@ const handleResize = () => {
   display: grid;
   grid-template-columns: 260px  1fr;
   height: calc(100% - 60px);
+  min-width: 0;
+  border-radius: 16px 0 0 0;
+  overflow: hidden;
+  background: var(--el-bg-color);
   @media (max-width: 767px) {
     grid-template-columns: 1fr;
   }
@@ -157,11 +161,20 @@ const handleResize = () => {
   display: grid;
   grid-template-columns: 1fr;
   height: calc(100% - 60px);
+  min-width: 0;
+  border-radius: 16px 0 0 0;
+  overflow: hidden;
+  background: var(--el-bg-color);
 }
 
 
 .main-view {
   background: var(--el-bg-color);
+  min-width: 0;
+}
+
+@media (max-width: 767px) {
+  .main-box-show, .main-box-hide { height: calc(100% - 50px); border-radius: 12px 12px 0 0; }
 }
 
 

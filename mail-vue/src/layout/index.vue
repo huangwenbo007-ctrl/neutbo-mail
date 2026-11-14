@@ -60,8 +60,7 @@ onBeforeUnmount(() => {
 }
 
 .aside-show {
-  -webkit-box-shadow: var(--aside-right-border);
-  box-shadow: var(--aside-right-border);
+  box-shadow: none;
   transform: translateX(0);
   transition: all 100ms ease;
   z-index: 101;
@@ -87,11 +86,12 @@ onBeforeUnmount(() => {
   top: 0;
   left: 0;
   overflow: hidden;
+  background: var(--mail-shell);
 }
 
 .main-container {
   min-height: 100%;
-  background: var(--el-bg-color);
+  background: var(--mail-shell);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
@@ -101,8 +101,8 @@ onBeforeUnmount(() => {
 }
 
 .el-header {
-  background: var(--el-bg-color);
-  border-bottom: solid 1px var(--el-border-color);
+  background: var(--mail-shell);
+  border-bottom: 0;
   padding: 0 0 0 0;
   @media (max-width: 767px) {
     height: 50px;

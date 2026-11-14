@@ -106,6 +106,15 @@ button, input, select, textarea {
 }
 
 :root {
+    --mail-shell: #f3f6fc;
+    --mail-sidebar: #f3f6fc;
+    --mail-sidebar-text: #394a62;
+    --mail-sidebar-hover: #e6edf7;
+    --mail-sidebar-active: #d9e8ff;
+    --mail-sidebar-active-text: #174d9e;
+    --mail-card-border: #e4eaf2;
+    --mail-account-active: #eaf2ff;
+    --mail-accent: #1f68d5;
     --el-color-primary: #1890ff;
     --el-color-primary-dark-2: #1064c0;
     --el-color-primary-light-3: #4dabff;
@@ -147,6 +156,15 @@ button, input, select, textarea {
 }
 
 .dark {
+    --mail-shell: #171c25;
+    --mail-sidebar: #171c25;
+    --mail-sidebar-text: #c8d4e4;
+    --mail-sidebar-hover: #293342;
+    --mail-sidebar-active: #304663;
+    --mail-sidebar-active-text: #deebff;
+    --mail-card-border: #343e4b;
+    --mail-account-active: #263a55;
+    --mail-accent: #91baff;
     --extra-light-fill: #191919;
     --settings-page-background: var(--extra-light-fill);
     --light-ill: #262727;

@@ -138,8 +138,14 @@
                        :showStatus="showStatus"
                        :showUserInfo="showUserInfo"
                        :type="type"/>
-      <div class="empty" v-if="noLoading && emailList.length === 0 && !loading">
-        <el-empty :image-size="isMobile ? 120 : null" :description="$t('noMessagesFound')"/>
+      <div class="empty" role="status" v-if="noLoading && emailList.length === 0 && !loading">
+        <div class="empty-state">
+          <div class="empty-icon" aria-hidden="true">
+            <Icon icon="solar:letter-linear" width="42" height="42" />
+          </div>
+          <strong>{{ $t('noMessagesFound') }}</strong>
+          <span>{{ $t('mailEmptyHint') }}</span>
+        </div>
       </div>
     </div>
     <el-dropdown
@@ -983,6 +989,7 @@ function renderHighlight(value) {
   color: var(--el-text-color-primary);
   overflow: hidden;
   height: 100%;
+  min-width: 0;
 }
 
 .scroll {
@@ -1000,6 +1007,31 @@ function renderHighlight(value) {
     align-items: center;
     height: 100%;
     width: 100%;
+    padding: 24px;
+    text-align: center;
+  }
+
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    color: var(--regular-text-color);
+    line-height: 1.5;
+
+    strong { color: var(--el-text-color-primary); font-size: 16px; font-weight: 600; }
+    span { color: var(--secondary-text-color); font-size: 13px; }
+  }
+
+  .empty-icon {
+    display: grid;
+    place-items: center;
+    width: 92px;
+    height: 92px;
+    margin-bottom: 8px;
+    border-radius: 28px;
+    color: var(--mail-accent);
+    background: var(--mail-sidebar-active);
   }
 
   .noLoading {
@@ -1295,6 +1327,7 @@ function renderHighlight(value) {
 
   &:hover {
     background-color: var(--email-hover-background);
+    box-shadow: 0 2px 7px rgba(35, 55, 80, .12);
     z-index: 0;
   }
 

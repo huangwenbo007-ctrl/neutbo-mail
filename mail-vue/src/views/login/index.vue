@@ -8,9 +8,22 @@
       <div class="x5 cloud"></div>
     </div>
     <div v-else :style="background"></div>
+    <div class="login-intro" aria-hidden="true">
+      <div class="intro-brand">
+        <img :src="brandLogo" alt="" />
+        <span>{{ settingStore.settings.title }}</span>
+      </div>
+      <div class="intro-copy">
+        <span class="intro-eyebrow">{{ $t('mailWelcomeLabel') }}</span>
+        <h1>{{ $t('mailWelcomeTitle') }}</h1>
+        <p>{{ $t('mailWelcomeDescription') }}</p>
+      </div>
+      <div class="intro-decoration"><Icon icon="solar:letter-linear" width="110" height="110" /></div>
+    </div>
     <div class="form-wrapper">
       <div class="container">
-        <span class="form-title">{{ settingStore.settings.title }}</span>
+        <div class="form-brand"><img :src="brandLogo" alt="" /><span>{{ settingStore.settings.title }}</span></div>
+        <span class="form-title">{{ show === 'login' ? $t('mailSignInTitle') : $t('mailRegisterTitle') }}</span>
         <span class="form-desc" v-if="show === 'login'">{{ $t('loginTitle') }}</span>
         <span class="form-desc" v-else>{{ $t('regTitle') }}</span>
         <div v-show="show === 'login'">
@@ -83,7 +96,7 @@
                     type="text" autocomplete="off" @keyup.enter="submitRegister"/>
           <el-input v-if="settingStore.settings.regKey === 2" v-model="registerForm.code"
                     :placeholder="$t('regKeyOptional')" type="text" autocomplete="off" @keyup.enter="submitRegister"/>
-          <el-input v-model="verification.externalEmail" placeholder="已有的外部邮箱（如 QQ 邮箱）" autocomplete="email"/>
+          <el-input v-model="verification.externalEmail" :placeholder="$t('externalEmailHint')" autocomplete="email"/>
           <el-input v-model="verification.emailVerificationCode" placeholder="6 位邮箱验证码" maxlength="6" inputmode="numeric">
             <template #append><el-button :disabled="sendCountdown > 0 || sendingCode" @click="sendCode">{{ sendCountdown ? `${sendCountdown} 秒后重发` : '发送验证码' }}</el-button></template>
           </el-input>
@@ -145,7 +158,7 @@
                   type="text" autocomplete="off" @keyup.enter="bind"/>
         <el-input v-if="settingStore.settings.regKey === 2" v-model="bindForm.code"
                   :placeholder="$t('regKeyOptional')" type="text" autocomplete="off" @keyup.enter="bind"/>
-        <el-input v-model="verification.externalEmail" placeholder="已有的外部邮箱（如 QQ 邮箱）" autocomplete="email"/>
+        <el-input v-model="verification.externalEmail" :placeholder="$t('externalEmailHint')" autocomplete="email"/>
         <el-input v-model="verification.emailVerificationCode" placeholder="6 位邮箱验证码" maxlength="6" inputmode="numeric">
           <template #append><el-button :disabled="sendCountdown > 0 || sendingCode" @click="sendCode">{{ sendCountdown ? `${sendCountdown} 秒后重发` : '发送验证码' }}</el-button></template>
         </el-input>
@@ -184,6 +197,7 @@ const userStore = useUserStore();
 const uiStore = useUiStore();
 const settingStore = useSettingStore();
 const route = useRoute();
+const brandLogo = `${import.meta.env.BASE_URL}mail.png`
 const loginLoading = ref(false)
 const bindLoading = ref(false)
 const oauthLoading = ref(false);
@@ -938,4 +952,59 @@ function submitRegister() {
   top: -90px;
 }
 
+/* A responsive sign-in surface that keeps custom backgrounds visible. */
+#login-box {
+  position: relative;
+  min-height: 100dvh;
+  background: linear-gradient(135deg, #eef5ff 0%, #f7faff 56%, #e8f1ff 100%);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+#background-wrap { opacity: .12; overflow: hidden; }
+.login-intro {
+  position: absolute;
+  inset: 0 46% 0 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  padding: clamp(32px, 6vw, 88px);
+  color: #1e3656;
+  pointer-events: none;
+  overflow: hidden;
+}
+.intro-brand, .form-brand { display: flex; align-items: center; gap: 11px; font-weight: 700; letter-spacing: -.02em; }
+.intro-brand { font-size: 21px; }
+.intro-brand img, .form-brand img { width: 36px; height: 36px; object-fit: contain; }
+.intro-copy { margin: auto 0; max-width: 520px; position: relative; z-index: 1; }
+.intro-eyebrow { color: #2c69c8; font-size: 12px; font-weight: 700; letter-spacing: .12em; }
+.intro-copy h1 { margin: 18px 0; font-size: clamp(36px, 4vw, 62px); line-height: 1.22; letter-spacing: -.04em; }
+.intro-copy p { max-width: 390px; color: #58708e; font-size: 16px; line-height: 1.8; }
+.intro-decoration { position: absolute; right: 9%; bottom: 9%; display: grid; place-items: center; width: 210px; height: 210px; border: 1px solid rgba(62, 119, 196, .16); border-radius: 50%; color: rgba(46, 111, 200, .22); transform: rotate(-12deg); }
+.form-wrapper { width: 46%; padding: 28px; overflow-y: auto; align-items: flex-start; }
+.container { width: min(100%, 450px); height: auto; min-height: 0; margin: auto; padding: 40px; border: 1px solid var(--mail-card-border); border-radius: 24px; box-shadow: 0 22px 64px rgba(36, 63, 102, .12); }
+.form-brand { color: var(--el-text-color-primary); font-size: 15px; margin-bottom: 34px; }
+.form-brand img { width: 32px; height: 32px; }
+.container .form-title { font-size: 27px !important; letter-spacing: -.03em; }
+.container .form-desc { margin-top: 8px; margin-bottom: 24px; line-height: 1.5; }
+.container .el-input { height: 44px; margin-bottom: 14px; }
+.container .el-input :deep(.el-input__inner) { height: 42px; }
+.container :deep(.el-input__wrapper) { border-radius: 10px; }
+.container .email-input :deep(.el-input__wrapper) { border-radius: 10px 0 0 10px; }
+.container .btn { height: 44px; border-radius: 10px; font-weight: 600; }
+.container .switch { margin-top: 24px; font-size: 14px; }
+:global(html.dark #login-box) { background: linear-gradient(135deg, #141d2a 0%, #182538 56%, #101923 100%); }
+:global(html.dark .login-intro) { color: #e5efff; }
+:global(html.dark .intro-eyebrow) { color: #9fc5ff; }
+:global(html.dark .intro-copy p) { color: #b2c3d9; }
+@media (max-width: 900px) {
+  .login-intro { display: none; }
+  .form-wrapper { position: relative; width: 100%; min-height: 100dvh; height: auto; padding: 24px; }
+  .container { width: min(100%, 450px); padding: 32px; margin: auto; }
+}
+@media (max-width: 480px) {
+  .form-wrapper { padding: 16px; }
+  .container { padding: 26px 22px; border-radius: 18px; }
+  .form-brand { margin-bottom: 25px; }
+  .container .form-title { font-size: 24px !important; }
+}
+@media (prefers-reduced-motion: reduce) { .x1, .x2, .x3, .x4, .x5 { animation: none; } }
 </style>

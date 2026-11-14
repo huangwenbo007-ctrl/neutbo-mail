@@ -281,27 +281,28 @@ onBeforeUnmount(() => {
 <style lang="scss" scoped>
 .email-search {
   position: absolute;
-  left: -1;
+  left: 150px;
   top: 50%;
   transform: translateY(-50%);
   z-index: 10;
-  width: min(450px, calc(100% - 20px));
+  width: min(450px, calc(100% - 230px));
   height: 36px;
   @media (max-width: 1080px) {
-    width: min(400px, calc(100% - 20px));
+    width: min(400px, calc(100% - 230px));
   }
 }
 
 @media (min-width: 768px) {
   .email-search.account-show {
     left: 259px;
+    width: min(450px, calc(100% - 335px));
   }
 }
 
 .search-placeholder {
   width: 100%;
   height: 36px;
-  border-radius: 6px;
+  border-radius: 12px;
   box-sizing: border-box;
 }
 
@@ -309,7 +310,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 10px;
+  padding: 0 14px;
   background: var(--el-fill-color-light);
   color: var(--el-text-color-secondary);
   text-align: left;
