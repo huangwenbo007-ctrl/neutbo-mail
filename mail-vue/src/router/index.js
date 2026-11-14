@@ -183,7 +183,13 @@ function removeLoading() {
         return;
     }
 
-    doc.remove()
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const elapsed = performance.now() - (window.neutboLoadingStartedAt || 0);
+    const delay = reduceMotion ? 0 : Math.max(0, 650 - elapsed);
+    window.setTimeout(() => {
+        doc.classList.add("loading-hide");
+        window.setTimeout(() => doc.remove(), reduceMotion ? 0 : 200);
+    }, delay);
 }
 
 export default router

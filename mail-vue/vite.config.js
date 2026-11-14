@@ -25,7 +25,7 @@ export default defineConfig(({mode}) => {
                     theme_color: '#FFFFFF',
                     icons: [
                         {
-                            src: 'mail-pwa.png',
+                            src: 'neutbo-pwa-v1.png',
                             sizes: '192x192',
                             type: 'image/png',
                         }

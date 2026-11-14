@@ -84,7 +84,7 @@ import {useUiStore} from "@/store/ui.js";
 const settingStore = useSettingStore();
 const uiStore = useUiStore();
 const route = useRoute();
-const logoUrl = `${import.meta.env.BASE_URL}mail.png`
+const logoUrl = `${import.meta.env.BASE_URL}neutbo-bird-v1.svg`
 const titleUsesDisplayFont = computed(() => !/\p{Script=Han}/u.test(settingStore.settings.title || ''))
 
 function openCompose() {
@@ -239,4 +239,6 @@ function openCompose() {
 .scroll {
 
 }
+
+:global(html.dark .title .logo) { filter: brightness(0) invert(1); }
 </style>
