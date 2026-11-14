@@ -19,6 +19,7 @@ const en = {
     SystemSettings: 'System Settings',
     noMoreData: 'No more data',
     noMessagesFound: 'No messages found',
+    mailEmptyHint: 'Messages will appear here',
     addAccount: 'Add email address',
     emailAccount: 'Email',
     account: 'Address',

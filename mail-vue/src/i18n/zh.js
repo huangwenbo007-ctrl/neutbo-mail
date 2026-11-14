@@ -19,6 +19,7 @@ const zh = {
     SystemSettings: '系统设置',
     noMoreData: '没有更多数据了',
     noMessagesFound: '没有任何邮件',
+    mailEmptyHint: '邮件会显示在这里',
     addAccount: '添加邮箱',
     emailAccount: '邮箱',
     account: '邮箱',
