@@ -129,8 +129,9 @@
         </template>
       </div>
     </div>
-    <el-dialog class="bind-dialog" v-model="showBindForm"  title="注册邮箱" >
+    <el-dialog class="bind-dialog" v-model="showBindForm" title="注册邮箱" @closed="resetBindTurnstile">
       <div class="bind-container">
+        <p>已为你建议邮箱地址，可以修改后继续。</p>
         <el-input :class="!hideLoginDomain ? 'email-input' : ''" v-model="bindForm.email" type="text" :placeholder="$t('emailAccount')" autocomplete="off" @keyup.enter="bind">
           <template #append v-if="!hideLoginDomain">
             <div @click.stop="openSelect">
@@ -162,6 +163,7 @@
         <el-input v-model="verification.emailVerificationCode" placeholder="6 位邮箱验证码" maxlength="6" inputmode="numeric">
           <template #append><el-button :disabled="sendCountdown > 0 || sendingCode" @click="sendCode">{{ sendCountdown ? `${sendCountdown} 秒后重发` : '发送验证码' }}</el-button></template>
         </el-input>
+        <div v-if="bindTurnstileShown" ref="bindTurnstileContainer" class="bind-turnstile"></div>
         <el-button class="btn" type="primary" @click="bind" :loading="bindLoading"
         >绑定
         </el-button>
@@ -172,7 +174,6 @@
 
 <script setup>
 import router from "@/router";
-import {useRoute} from "vue-router";
 import {computed, nextTick, onUnmounted, reactive, ref} from "vue";
 import {login} from "@/request/login.js";
 import {register} from "@/request/login.js";
@@ -196,7 +197,6 @@ const accountStore = useAccountStore();
 const userStore = useUserStore();
 const uiStore = useUiStore();
 const settingStore = useSettingStore();
-const route = useRoute();
 const brandLogo = `${import.meta.env.BASE_URL}neutbo-bird-v1.svg`
 const loginLoading = ref(false)
 const bindLoading = ref(false)
@@ -238,13 +238,6 @@ function verificationParams() {
 
 const oauthKeys = ['linuxdo', 'github', 'google']
 
-const oauthProvider = computed(() => {
-  const fromState = route.query.state
-  if (oauthKeys.includes(fromState)) return fromState
-  const fromStore = sessionStorage.getItem('oauthProvider')
-  return oauthKeys.includes(fromStore) ? fromStore : null
-})
-
 const oauthProviders = computed(() => {
   const allProviders = [
     { key: 'google', label: 'Google', icon: 'devicon:google', iconType: 'iconify' },
@@ -256,7 +249,7 @@ const oauthProviders = computed(() => {
 
 const bindForm = reactive({
   email: '',
-  oauthUserId: '',
+  bindToken: '',
   code: ''
 })
 
@@ -277,6 +270,10 @@ const domainList = settingStore.domainList;
 const registerLoading = ref(false)
 suffix.value = domainList[0]
 const verifyShow = ref(false)
+const bindTurnstileShown = ref(false)
+const bindTurnstileContainer = ref(null)
+let bindTurnstileId = null
+let bindTurnstileToken = ''
 let verifyToken = ''
 let turnstileId = null
 let botJsError = ref(false)
@@ -363,14 +360,26 @@ const getEmailName = (email) => {
   return email.split('@')[0]
 }
 
-function oauthLogin(provider) {
+async function oauthLogin(provider) {
   const clientId = settingStore.settings[provider + 'ClientId']
   const redirectUri = encodeURIComponent(window.location.origin + '/login')
+  const state = Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('')
   sessionStorage.setItem('oauthProvider', provider)
+  sessionStorage.setItem('oauthState', state)
+  let pkce = ''
+  if (provider === 'google') {
+    const verifier = Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('')
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)))
+    const challenge = btoa(String.fromCharCode(...digest)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    sessionStorage.setItem('oauthPkceVerifier', verifier)
+    pkce = `&code_challenge=${challenge}&code_challenge_method=S256`
+  } else {
+    sessionStorage.removeItem('oauthPkceVerifier')
+  }
   const authorizeUrls = {
-    linuxdo: `https://connect.linux.do/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=openid+profile+email&state=${provider}`,
-    github: `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&scope=user:email&state=${provider}`,
-    google: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=openid+profile+email&state=${provider}`,
+    linuxdo: `https://connect.linux.do/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=openid+profile+email&state=${state}`,
+    github: `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&scope=user:email&state=${state}`,
+    google: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=openid+profile+email&state=${state}${pkce}`,
   }
   window.location.href = authorizeUrls[provider]
 }
@@ -387,18 +396,32 @@ async function oauthGetUser() {
 
   const params = new URLSearchParams(window.location.search)
   const code = params.get('code')
-  if (!code || !oauthProvider.value) return
+  if (!code) return
 
-  const provider = oauthProvider.value
-  oauthLoading.value = true
+  const provider = sessionStorage.getItem('oauthProvider')
+  const expectedState = sessionStorage.getItem('oauthState')
+  const codeVerifier = sessionStorage.getItem('oauthPkceVerifier')
   sessionStorage.removeItem('oauthProvider')
+  sessionStorage.removeItem('oauthState')
+  sessionStorage.removeItem('oauthPkceVerifier')
   window.history.replaceState({}, '', window.location.origin + window.location.pathname)
+  if (!oauthKeys.includes(provider) || !expectedState || params.get('state') !== expectedState || (provider === 'google' && !codeVerifier)) {
+    ElMessage.error('登录请求已失效，请重新登录')
+    return
+  }
+  oauthLoading.value = true
 
-  loginFns[provider](code, window.location.origin + '/login').then(data => {
-
-    bindForm.oauthUserId = data.userInfo.oauthUserId;
+  loginFns[provider](code, window.location.origin + '/login', codeVerifier).then(data => {
 
     if (!data.token) {
+      if (!data.bindToken) throw new Error('Missing binding proof')
+      bindForm.bindToken = data.bindToken
+      const source = String(data.userInfo?.username || '').split('@')[0].toLowerCase()
+      const safe = source.replace(/[^a-z0-9._-]/g, '').replace(/^[._-]+|[._-]+$/g, '') || 'user'
+      const random = Array.from(crypto.getRandomValues(new Uint8Array(3)), b => b.toString(16).padStart(2, '0')).join('')
+      const min = Math.min(64, Number(settingStore.settings.minEmailPrefix) || 1)
+      const alias = `${safe.slice(0, 57)}${random}`.padEnd(min, '0').slice(0, 64)
+      bindForm.email = hideLoginDomain.value ? alias + suffix.value : alias
       showBindForm.value = true
       oauthLoading.value = false
       ElMessage({
@@ -416,7 +439,32 @@ async function oauthGetUser() {
   })
 }
 
-function bind() {
+async function showBindTurnstile() {
+  bindTurnstileShown.value = true
+  await nextTick()
+  try {
+    const api = window.turnstile?.render ? window.turnstile : await reloadTurnstileScript()
+    if (bindTurnstileId === null) {
+      bindTurnstileId = api.render(bindTurnstileContainer.value, {
+        sitekey: settingStore.settings.siteKey,
+        callback: value => { bindTurnstileToken = value },
+        'expired-callback': () => { bindTurnstileToken = '' },
+        'error-callback': () => { bindTurnstileToken = ''; ElMessage.error('人机验证加载失败，请重试') }
+      })
+    }
+  } catch {
+    ElMessage.error('人机验证加载失败，请重试')
+  }
+}
+
+function resetBindTurnstile() {
+  if (bindTurnstileId !== null && window.turnstile?.remove) window.turnstile.remove(bindTurnstileId)
+  bindTurnstileId = null
+  bindTurnstileToken = ''
+  bindTurnstileShown.value = false
+}
+
+async function bind() {
 
   if (bindLoading.value) return
 
@@ -467,13 +515,30 @@ function bind() {
 
   const verify = verificationParams()
   if (!verify) return
-  const form = {email, oauthUserId: bindForm.oauthUserId, code: bindForm.code, ...verify}
+  const needsTurnstile = settingStore.settings.registerVerify === 0 || (settingStore.settings.registerVerify === 2 && settingStore.settings.regVerifyOpen)
+  if (needsTurnstile && !bindTurnstileToken) {
+    bindLoading.value = true
+    try {
+      await showBindTurnstile()
+      ElMessage.warning(t('botVerifyMsg'))
+    } finally {
+      bindLoading.value = false
+    }
+    return
+  }
+  const form = {email, bindToken: bindForm.bindToken, code: bindForm.code, token: bindTurnstileToken, ...verify}
 
   bindLoading.value = true
   oauthBindUser(form).then(data => {
     saveToken(data.token)
-  }).catch(() => {
+  }).catch(res => {
     bindLoading.value = false
+    if (res.code === 400) {
+      bindTurnstileToken = ''
+      settingStore.settings.regVerifyOpen = true
+      if (bindTurnstileId !== null) window.turnstile.reset(bindTurnstileId)
+      else showBindTurnstile()
+    }
   })
 }
 
