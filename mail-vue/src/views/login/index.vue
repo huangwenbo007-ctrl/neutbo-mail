@@ -197,7 +197,7 @@ const userStore = useUserStore();
 const uiStore = useUiStore();
 const settingStore = useSettingStore();
 const route = useRoute();
-const brandLogo = `${import.meta.env.BASE_URL}mail.png`
+const brandLogo = `${import.meta.env.BASE_URL}neutbo-bird-v1.svg`
 const loginLoading = ref(false)
 const bindLoading = ref(false)
 const oauthLoading = ref(false);
@@ -717,6 +717,8 @@ function submitRegister() {
     -webkit-text-security: disc !important;
   }
 }
+
+html.dark .intro-brand img, html.dark .form-brand img { filter: brightness(0) invert(1); }
 </style>
 
 <style lang="scss" scoped>

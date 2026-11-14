@@ -6,9 +6,10 @@
   <meta name="theme-color" content="#F1F1F1" id="theme-color-meta">
   <meta name="description" content="Cloud Mail 是一个 Serverless 响应式邮箱服务，支持邮件发送，可部署到 Cloudflare 平台，降低服务器成本。Cloud Mail is a serverless responsive email service that supports email sending and can be deployed on Cloudflare to reduce server costs.">
   <title>Cloud Mail</title>
-  <link rel="icon" href="/public/mail.png" type="image/png">
+  <link rel="icon" href="%BASE_URL%neutbo-favicon-v1.svg" type="image/svg+xml">
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <script>
+    window.neutboLoadingStartedAt = performance.now();
     const uiStoreStr =  localStorage.getItem('ui')
     let isDark = false
     if (uiStoreStr) {
@@ -23,115 +24,39 @@
   </script>
 </head>
 <style>
-  html {
-    background: #FFFFFF;
-  }
-  .dark {
-    background: #141414;
-  }
+  html { background: #fff; }
+  html.dark { background: #141414; }
   #loading-first {
-    position: fixed;
-    left: 0;
-    top: 0;
-    height: 100%;
-    width: 100%;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 500;
-    background: var(--el-bg-color);
+    position: fixed; inset: 0; z-index: 500; display: flex; align-items: center;
+    justify-content: center; background: #fff; color: #000; opacity: 1;
+    transition: opacity 200ms ease;
   }
-
-  .loading-hide {
-    pointer-events: none;
-    opacity: 0;
-  }
-
-  .loading-icon {
-    display: inline-flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 2px;
-  }
-
-  .loading-image {
-    width: 70px;
-    height: 70px;
-    object-fit: contain;
-  }
-
-  .loading-progress {
-    position: relative;
-    width: 64px;
-    height: 4px;
-    overflow: hidden;
-    border-radius: 999px;
-    background: rgba(64, 158, 255, 0.18);
-  }
-
-  .loading-progress::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    height: 100%;
-    border-radius: inherit;
-    background: #409EFF;
-    transform: scaleX(0);
-    transform-origin: left center;
-    animation: loading-progress-grow 2.4s linear forwards;
-  }
-
-  .loading-progress::after {
-    content: "";
-    position: absolute;
-    top: 0;
-    width: 24px;
-    height: 100%;
-    border-radius: inherit;
-    background: rgba(64, 158, 255, 0.45);
-    filter: blur(4px);
-    transform: translateX(-24px);
-    animation: loading-progress-peg 2.4s linear forwards;
-  }
-
-  .loading-complete .loading-progress::before {
-    animation: none;
-    transform: scaleX(1);
-    transition: transform 200ms linear;
-  }
-
-  .loading-complete .loading-progress::after {
-    animation: none;
-    transform: translateX(60px);
-    transition: transform 200ms linear;
-  }
-
-  @keyframes loading-progress-grow {
-    0% {
-      transform: scaleX(0);
-    }
-    100% {
-      transform: scaleX(1);
-    }
-  }
-
-  @keyframes loading-progress-peg {
-    0% {
-      transform: translateX(-24px);
-    }
-    100% {
-      transform: translateX(60px);
-    }
+  html.dark #loading-first { background: #141414; color: #fff; }
+  #loading-first.loading-hide { pointer-events: none; opacity: 0; }
+  .loading-icon { display: flex; flex-direction: column; align-items: center; text-align: center; }
+  .loading-bird { width: 144px; height: 144px; overflow: visible; }
+  .loading-bird path { fill: currentColor; stroke: currentColor; stroke-width: 6; stroke-linejoin: round; }
+  .loading-wing, .loading-body { transform-box: fill-box; transform-origin: center; }
+  .loading-wing { animation: wing-in 580ms cubic-bezier(.18,.72,.2,1) both; }
+  .loading-body { animation: body-in 580ms cubic-bezier(.18,.72,.2,1) 70ms both; }
+  .loading-label { margin: 8px 0 0; color: #637084; font: 14px/1.5 system-ui, sans-serif; }
+  html.dark .loading-label { color: #b8c1cc; }
+  .loading-dots span { animation: loading-dot 1.15s ease-in-out infinite; }
+  .loading-dots span:nth-child(2) { animation-delay: .16s; }
+  .loading-dots span:nth-child(3) { animation-delay: .32s; }
+  @keyframes wing-in { from { opacity: 0; transform: translate(-26px, 12px) rotate(-8deg) scale(.94); } to { opacity: 1; transform: none; } }
+  @keyframes body-in { from { opacity: 0; transform: translate(24px, 11px) scale(.96); } to { opacity: 1; transform: none; } }
+  @keyframes loading-dot { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) {
+    #loading-first { transition: none; }
+    .loading-wing, .loading-body, .loading-dots span { animation: none; }
   }
 </style>
 <body>
-<div id="loading-first" >
+<div id="loading-first" role="status" aria-label="Neutbo Mail 正在加载">
   <div class="loading-icon">
-    <img class="loading-image" src="/mail-pwa.png" alt="Cloud Mail">
-    <div class="loading-progress" aria-hidden="true"></div>
+    <svg class="loading-bird" viewBox="273 18 990 990" aria-hidden="true"><g class="loading-body"><path d="M 933.863 326.072 C 890.313 332.469, 851.265 360.493, 815.310 411.157 C 808.341 420.976, 797 439.257, 797 440.671 C 797 441.214, 799.587 441.757, 802.750 441.879 C 816.819 442.419, 829.010 447.918, 839.514 458.460 C 860.800 479.823, 865.480 514.635, 852.344 553.898 C 833.341 610.695, 789.406 661.256, 720 706.199 C 693.958 723.062, 674.397 733.928, 615.500 764.250 C 550.854 797.531, 521.113 815.238, 492.500 837.482 C 481.146 846.308, 461 864.517, 461 865.953 C 461 866.400, 465.838 864.990, 471.750 862.819 C 541.665 837.151, 590.993 824.640, 685.715 808.554 C 742.889 798.845, 756.584 795.867, 785.500 786.858 C 853.357 765.716, 904.737 727.711, 935.513 675.897 C 953.705 645.269, 965.103 610.994, 975.552 555.500 C 978.037 542.300, 981.239 526.550, 982.668 520.500 C 997.500 457.668, 1034.894 416.311, 1100 390.733 C 1125.341 380.778, 1144.814 376.622, 1187 372.166 L 1194.500 371.374 1185.803 368.643 C 1163.011 361.485, 1145.441 359.854, 1095 360.216 L 1055.500 360.500 1048.320 357.875 C 1044.371 356.431, 1036.468 352.316, 1030.758 348.732 C 1010.346 335.918, 996.706 330.454, 976.506 327.001 C 964.199 324.897, 944.747 324.473, 933.863 326.072"/></g><g class="loading-wing"><path d="M 352.469 166.750 C 350.201 174.545, 347.419 189.299, 345.821 202 C 343.754 218.433, 344.064 269.945, 346.336 287.500 C 353.726 344.600, 371.802 398.386, 400.273 448 C 460.439 552.845, 551.127 616.420, 654.273 626.064 C 675.017 628.003, 723.607 625.790, 720.318 623.056 C 719.868 622.682, 713.650 619.971, 706.500 617.032 C 674.242 603.772, 635.140 581.989, 609 562.718 C 541.275 512.787, 496.733 444.567, 484.569 372.136 C 484.017 368.846, 484.054 368.805, 486.252 370.230 C 501.713 380.252, 532.537 394.988, 571.500 410.984 C 621.430 431.482, 646.902 444.773, 669.947 462.353 C 707.478 490.984, 731.496 528.379, 741.172 573.249 C 744.145 587.035, 744.419 618.653, 741.685 632.500 C 739.205 645.060, 735.450 658.850, 731.503 669.894 L 728.145 679.289 733.638 673.894 C 760.341 647.672, 782.509 603.523, 790.371 560.909 C 805.388 479.507, 771.394 403.088, 699.179 355.907 C 675.589 340.496, 646.319 327.721, 590.500 308.475 C 523.144 285.251, 492.506 271.967, 455.500 249.939 C 417.638 227.403, 382.365 196.825, 360.844 167.884 C 358.029 164.098, 355.369 161, 354.933 161 C 354.498 161, 353.389 163.588, 352.469 166.750"/></g></svg>
+    <p class="loading-label">正在加载 Neutbo Mail<span class="loading-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></p>
   </div>
 </div>
 <div id="app"></div>
