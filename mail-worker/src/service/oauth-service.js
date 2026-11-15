@@ -22,30 +22,11 @@ const oauthService = {
 			throw new BizError('第三方登录已失效，请重新登录');
 		}
 		this.assertEnabled(await settingService.query(c), proof.platform + 'Switch');
-		// Reserve this identity atomically so concurrent requests cannot attach it to two accounts.
-		const reserved = await c.env.db.prepare('UPDATE oauth SET user_id = -1 WHERE oauth_id = ? AND platform = ? AND user_id = 0 RETURNING oauth_id')
-			.bind(proof.oauthId, proof.platform).first();
-		if (!reserved) throw new BizError('第三方账号已绑定或正在处理中');
-		let registered = false;
-		let existingBefore = null;
-		try {
-			existingBefore = typeof email === 'string' ? await userService.selectByEmailIncludeDel(c, email) : null;
-			const randomPassword = crypto.randomUUID().replace(/-/g, '').slice(0, 24);
-			await loginService.register(c, { email, password: randomPassword, code, token, externalEmail, emailChallenge, emailVerificationCode });
-			registered = true;
-			const userRow = await userService.selectByEmail(c, email);
-			if (!userRow) throw new BizError('邮箱创建后无法完成绑定，请联系管理员');
-			const linked = await c.env.db.prepare('UPDATE oauth SET user_id = ? WHERE oauth_id = ? AND user_id = -1 RETURNING oauth_id')
-				.bind(userRow.userId, proof.oauthId).first();
-			if (!linked) throw new BizError('邮箱创建后无法完成绑定，请联系管理员');
-			const jwtToken = await loginService.login(c, { email, password: null }, true);
-			return { token: jwtToken };
-		} catch (error) {
-			// Never release a reservation after account creation: retrying could create another account.
-			const existingAfter = typeof email === 'string' ? await userService.selectByEmailIncludeDel(c, email) : null;
-			if (!registered && (existingBefore || !existingAfter)) await c.env.db.prepare('UPDATE oauth SET user_id = 0 WHERE oauth_id = ? AND user_id = -1').bind(proof.oauthId).run();
-			throw error;
-		}
+		const randomPassword = crypto.randomUUID().replace(/-/g, '').slice(0, 24);
+		await loginService.register(c, { email, password: randomPassword, code, token, externalEmail, emailChallenge, emailVerificationCode },
+			{ oauthId: proof.oauthId, platform: proof.platform });
+		const jwtToken = await loginService.login(c, { email, password: null }, true);
+		return { token: jwtToken };
 	},
 
 	async linuxDoLogin(c, params) {
@@ -250,3 +231,4 @@ const oauthService = {
 }
 
 export default  oauthService
+

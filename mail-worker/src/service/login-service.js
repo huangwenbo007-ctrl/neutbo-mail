@@ -23,7 +23,7 @@ import registrationEmailService from './registration-email-service';
 
 const loginService = {
 
-	async register(c, params) {
+	async register(c, params, oauthBinding = null) {
 
 		const { email, password, token, code } = params;
 
@@ -142,12 +142,36 @@ const loginService = {
 		}
 
 		let userId
+		let creationCommitted = false
 
 		try {
-			userId = await userService.insert(c, { email, regKeyId, password: hash, salt, type: type || defType });
-			await accountService.insert(c, { userId: userId, email, name: emailUtils.getName(email) });
+			if (oauthBinding) {
+				// Creating the user, mailbox, and OAuth link is one D1 transaction. If
+				// the Worker stops, the identity is either unbound or fully linked.
+				const results = await c.env.db.batch([
+					c.env.db.prepare(`INSERT INTO user (email, reg_key_id, password, salt, type)
+						SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM oauth WHERE oauth_id = ? AND platform = ? AND user_id = 0)
+						AND NOT EXISTS (SELECT 1 FROM user WHERE email = ? COLLATE NOCASE)
+						AND NOT EXISTS (SELECT 1 FROM account WHERE email = ? COLLATE NOCASE)`)
+						.bind(email, regKeyId, hash, salt, type || defType, oauthBinding.oauthId, oauthBinding.platform, email, email),
+					c.env.db.prepare(`INSERT INTO account (user_id, email, name)
+						SELECT user_id, ?, ? FROM user WHERE email = ? COLLATE NOCASE AND changes() = 1`)
+						.bind(email, emailUtils.getName(email), email),
+					c.env.db.prepare(`UPDATE oauth SET user_id = (SELECT user_id FROM user WHERE email = ? COLLATE NOCASE)
+						WHERE oauth_id = ? AND platform = ? AND user_id = 0 AND changes() = 1`)
+						.bind(email, oauthBinding.oauthId, oauthBinding.platform),
+				]);
+				if (results.some(result => result.meta.changes !== 1)) throw new BizError('邮箱已注册或第三方账号已绑定，请重新登录');
+				creationCommitted = true;
+				const userRow = await userService.selectByEmail(c, email);
+				if (!userRow) throw new BizError('邮箱创建后无法完成登录，请联系管理员');
+				userId = userRow.userId;
+			} else {
+				userId = await userService.insert(c, { email, regKeyId, password: hash, salt, type: type || defType });
+				await accountService.insert(c, { userId: userId, email, name: emailUtils.getName(email) });
+			}
 		} catch (error) {
-			if (consumedCode) {
+			if (consumedCode && !creationCommitted) {
 				await regKeyService.restoreCount(c, consumedCode)
 			}
 			throw error
@@ -286,3 +310,4 @@ const loginService = {
 };
 
 export default loginService;
+

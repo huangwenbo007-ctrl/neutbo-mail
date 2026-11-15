@@ -169,6 +169,21 @@ it('allows only one account to bind the same Google identity concurrently', asyn
   expect(users.n).toBe(1);
 });
 
+it('rolls back a failed mailbox insert so the Google identity can be retried', async () => {
+  await env.db.prepare("UPDATE setting SET google_switch=0, google_client_id='test-client', google_client_secret='test-secret'").run();
+  await refresh();
+  const oauth = await googleLogin('google-interrupted');
+  const verified = await proof('first@external.test');
+  await env.db.prepare("CREATE TRIGGER simulate_account_failure BEFORE INSERT ON account BEGIN SELECT RAISE(ABORT, 'simulated failure'); END").run();
+  const bind = async body => (await SELF.fetch('https://local.test/api/oauth/bindUser',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  expect((await bind({email:'recovery@example.com',bindToken:oauth.data.bindToken,...verified})).code).not.toBe(200);
+  expect((await env.db.prepare("SELECT count(*) AS n FROM user WHERE email='recovery@example.com'").first()).n).toBe(0);
+  expect((await env.db.prepare("SELECT user_id FROM oauth WHERE oauth_user_id='google-interrupted'").first()).user_id).toBe(0);
+  await env.db.prepare('DROP TRIGGER simulate_account_failure').run();
+  const retryProof = await proof('retry@external.test');
+  expect((await bind({email:'recovery@example.com',bindToken:oauth.data.bindToken,...retryProof})).code).toBe(200);
+});
+
 it('enforces invitation and Turnstile for Google registration', async () => {
   await env.db.prepare("UPDATE setting SET google_switch=0, google_client_id='test-client', google_client_secret='test-secret'").run();
   await refresh();
@@ -186,3 +201,4 @@ it('enforces invitation and Turnstile for Google registration', async () => {
   expect((await bind({...params,code:'oauth-invite',token:'test-turnstile'})).code).toBe(200);
   expect((await env.db.prepare("SELECT count FROM reg_key WHERE code='oauth-invite'").first()).count).toBe(0);
 });
+
