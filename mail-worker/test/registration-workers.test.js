@@ -201,4 +201,3 @@ it('enforces invitation and Turnstile for Google registration', async () => {
   expect((await bind({...params,code:'oauth-invite',token:'test-turnstile'})).code).toBe(200);
   expect((await env.db.prepare("SELECT count FROM reg_key WHERE code='oauth-invite'").first()).count).toBe(0);
 });
-
