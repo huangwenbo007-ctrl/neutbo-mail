@@ -174,14 +174,62 @@ it('rolls back a failed mailbox insert so the Google identity can be retried', a
   await refresh();
   const oauth = await googleLogin('google-interrupted');
   const verified = await proof('first@external.test');
+  await env.db.prepare('UPDATE setting SET reg_key=0').run();
+  const role = await env.db.prepare('SELECT role_id FROM role LIMIT 1').first();
+  await env.db.prepare("INSERT INTO reg_key (code,count,role_id,expire_time) VALUES ('recovery-invite',1,?,'2099-01-01 00:00:00')").bind(role.role_id).run();
+  await refresh();
   await env.db.prepare("CREATE TRIGGER simulate_account_failure BEFORE INSERT ON account BEGIN SELECT RAISE(ABORT, 'simulated failure'); END").run();
   const bind = async body => (await SELF.fetch('https://local.test/api/oauth/bindUser',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
-  expect((await bind({email:'recovery@example.com',bindToken:oauth.data.bindToken,...verified})).code).not.toBe(200);
+  expect((await bind({email:'recovery@example.com',bindToken:oauth.data.bindToken,code:'recovery-invite',...verified})).code).not.toBe(200);
   expect((await env.db.prepare("SELECT count(*) AS n FROM user WHERE email='recovery@example.com'").first()).n).toBe(0);
   expect((await env.db.prepare("SELECT user_id FROM oauth WHERE oauth_user_id='google-interrupted'").first()).user_id).toBe(0);
+  expect((await env.db.prepare("SELECT count FROM reg_key WHERE code='recovery-invite'").first()).count).toBe(1);
   await env.db.prepare('DROP TRIGGER simulate_account_failure').run();
   const retryProof = await proof('retry@external.test');
-  expect((await bind({email:'recovery@example.com',bindToken:oauth.data.bindToken,...retryProof})).code).toBe(200);
+  expect((await bind({email:'recovery@example.com',bindToken:oauth.data.bindToken,code:'recovery-invite',...retryProof})).code).toBe(200);
+  expect((await env.db.prepare("SELECT count FROM reg_key WHERE code='recovery-invite'").first()).count).toBe(0);
+});
+
+it('uses a single remaining invitation only once across concurrent Google registrations', async () => {
+  await env.db.prepare("UPDATE setting SET google_switch=0, google_client_id='test-client', google_client_secret='test-secret'").run();
+  await refresh();
+  const a = await googleLogin('invite-race-a');
+  const b = await googleLogin('invite-race-b');
+  const proofA = await proof('invite-a@external.test');
+  const proofB = await proof('invite-b@external.test');
+  await env.db.prepare('UPDATE setting SET reg_key=0').run();
+  const role = await env.db.prepare('SELECT role_id FROM role LIMIT 1').first();
+  await env.db.prepare("INSERT INTO reg_key (code,count,role_id,expire_time) VALUES ('last-invite',1,?,'2099-01-01 00:00:00')").bind(role.role_id).run();
+  await refresh();
+  const bind = async body => (await SELF.fetch('https://local.test/api/oauth/bindUser',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  const responses = await Promise.all([
+    bind({email:'invite-a@example.com',bindToken:a.data.bindToken,code:'last-invite',...proofA}),
+    bind({email:'invite-b@example.com',bindToken:b.data.bindToken,code:'last-invite',...proofB}),
+  ]);
+  expect(responses.filter(r => r.code === 200)).toHaveLength(1);
+  expect((await env.db.prepare("SELECT count FROM reg_key WHERE code='last-invite'").first()).count).toBe(0);
+  expect((await env.db.prepare("SELECT count(*) AS n FROM user WHERE email IN ('invite-a@example.com','invite-b@example.com')").first()).n).toBe(1);
+});
+
+it('falls back to the default role if an optional invitation is used concurrently', async () => {
+  await env.db.prepare("UPDATE setting SET google_switch=0, google_client_id='test-client', google_client_secret='test-secret'").run();
+  await refresh();
+  const a = await googleLogin('optional-race-a');
+  const b = await googleLogin('optional-race-b');
+  const proofA = await proof('optional-a@external.test');
+  const proofB = await proof('optional-b@external.test');
+  await env.db.prepare('UPDATE setting SET reg_key=2').run();
+  const role = await env.db.prepare('SELECT role_id FROM role LIMIT 1').first();
+  await env.db.prepare("INSERT INTO reg_key (code,count,role_id,expire_time) VALUES ('optional-invite',1,?,'2099-01-01 00:00:00')").bind(role.role_id).run();
+  await refresh();
+  const bind = async body => (await SELF.fetch('https://local.test/api/oauth/bindUser',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  const responses = await Promise.all([
+    bind({email:'optional-a@example.com',bindToken:a.data.bindToken,code:'optional-invite',...proofA}),
+    bind({email:'optional-b@example.com',bindToken:b.data.bindToken,code:'optional-invite',...proofB}),
+  ]);
+  expect(responses.filter(r => r.code === 200)).toHaveLength(2);
+  expect((await env.db.prepare("SELECT count FROM reg_key WHERE code='optional-invite'").first()).count).toBe(0);
+  expect((await env.db.prepare("SELECT count(*) AS n FROM user WHERE email IN ('optional-a@example.com','optional-b@example.com')").first()).n).toBe(2);
 });
 
 it('enforces invitation and Turnstile for Google registration', async () => {

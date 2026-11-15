@@ -128,7 +128,7 @@ const loginService = {
 		let consumedCode = null
 		const usingRegKey = regKey !== settingConst.regKey.CLOSE && type
 
-		if (usingRegKey && !await regKeyService.consumeCount(c, code)) {
+		if (!oauthBinding && usingRegKey && !await regKeyService.consumeCount(c, code)) {
 			if (regKey === settingConst.regKey.OPEN) {
 				throw new BizError(t('noRegKeyCount'))
 			}
@@ -137,7 +137,7 @@ const loginService = {
 			defType = await this.useDefaultRole(c, email)
 		}
 
-		if (usingRegKey && type) {
+		if (!oauthBinding && usingRegKey && type) {
 			consumedCode = code
 		}
 
@@ -148,19 +148,29 @@ const loginService = {
 			if (oauthBinding) {
 				// Creating the user, mailbox, and OAuth link is one D1 transaction. If
 				// the Worker stops, the identity is either unbound or fully linked.
-				const results = await c.env.db.batch([
+				const createAndBind = async (withKey) => c.env.db.batch([
 					c.env.db.prepare(`INSERT INTO user (email, reg_key_id, password, salt, type)
 						SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM oauth WHERE oauth_id = ? AND platform = ? AND user_id = 0)
 						AND NOT EXISTS (SELECT 1 FROM user WHERE email = ? COLLATE NOCASE)
-						AND NOT EXISTS (SELECT 1 FROM account WHERE email = ? COLLATE NOCASE)`)
-						.bind(email, regKeyId, hash, salt, type || defType, oauthBinding.oauthId, oauthBinding.platform, email, email),
+						AND NOT EXISTS (SELECT 1 FROM account WHERE email = ? COLLATE NOCASE)
+						${withKey ? 'AND EXISTS (SELECT 1 FROM reg_key WHERE rege_key_id = ? AND count > 0 AND datetime(expire_time) > CURRENT_TIMESTAMP)' : ''}`)
+						.bind(...[email, withKey ? regKeyId : 0, hash, salt, withKey ? type : defType, oauthBinding.oauthId, oauthBinding.platform, email, email, ...(withKey ? [regKeyId] : [])]),
 					c.env.db.prepare(`INSERT INTO account (user_id, email, name)
 						SELECT user_id, ?, ? FROM user WHERE email = ? COLLATE NOCASE AND changes() = 1`)
 						.bind(email, emailUtils.getName(email), email),
 					c.env.db.prepare(`UPDATE oauth SET user_id = (SELECT user_id FROM user WHERE email = ? COLLATE NOCASE)
 						WHERE oauth_id = ? AND platform = ? AND user_id = 0 AND changes() = 1`)
 						.bind(email, oauthBinding.oauthId, oauthBinding.platform),
+					...(withKey ? [c.env.db.prepare('UPDATE reg_key SET count = count - 1 WHERE rege_key_id = ? AND count > 0 AND changes() = 1').bind(regKeyId)] : []),
 				]);
+				let results = await createAndBind(Boolean(usingRegKey));
+				if (usingRegKey && results[0].meta.changes === 0 && regKey === settingConst.regKey.OPTIONAL) {
+					const keyStillAvailable = await c.env.db.prepare('SELECT 1 AS available FROM reg_key WHERE rege_key_id = ? AND count > 0 AND datetime(expire_time) > CURRENT_TIMESTAMP').bind(regKeyId).first();
+					if (!keyStillAvailable) {
+						defType = await this.useDefaultRole(c, email);
+						results = await createAndBind(false);
+					}
+				}
 				if (results.some(result => result.meta.changes !== 1)) throw new BizError('邮箱已注册或第三方账号已绑定，请重新登录');
 				creationCommitted = true;
 				const userRow = await userService.selectByEmail(c, email);
