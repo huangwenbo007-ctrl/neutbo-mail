@@ -134,9 +134,10 @@ test('stages attachment keys and removes only the claimed user metadata', async 
 });
 
 test('requests, restores and locks an expired request atomically', async () => {
-  const { requestDeletion, restoreDeletion, claimDeletion, readActiveSessionGeneration, withAccountLock } = await import('../src/service/account-deletion-state.js');
+  const { requestDeletion: requestDeletionRaw, restoreDeletion, claimDeletion, readActiveSessionGeneration, withAccountLock } = await import('../src/service/account-deletion-state.js');
+  const requestDeletion = (db, userId, now) => requestDeletionRaw(db, userId, now, 'admin@example.com');
   const raw = new DatabaseSync(':memory:');
-  raw.exec('CREATE TABLE user (user_id INTEGER PRIMARY KEY, is_del INTEGER NOT NULL DEFAULT 0, status INTEGER NOT NULL DEFAULT 0); INSERT INTO user (user_id) VALUES (1), (2)');
+  raw.exec("CREATE TABLE user (user_id INTEGER PRIMARY KEY, email TEXT NOT NULL DEFAULT 'user@example.com', is_del INTEGER NOT NULL DEFAULT 0, status INTEGER NOT NULL DEFAULT 0); INSERT INTO user (user_id) VALUES (1), (2); INSERT INTO user (user_id, email) VALUES (4, 'Admin@Example.com')");
   raw.exec(readFileSync(join(__dirname, '../migrations/account-deletion-draft.sql'), 'utf8'));
   const db = {
     prepare(sql) {
@@ -153,6 +154,10 @@ test('requests, restores and locks an expired request atomically', async () => {
   };
   const start = 100;
   const due = start + 30 * 86400;
+  await assert.rejects(requestDeletionRaw(db, 1, start), /Administrator identity is required/);
+  assert.equal(await requestDeletion(db, 4, start), false);
+  assert.equal(raw.prepare('SELECT is_del FROM user WHERE user_id=4').get().is_del, 0);
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM account_deletion_request WHERE user_id=4').get().n, 0);
   assert.equal(await readActiveSessionGeneration(db, 1), 0);
   let unlock;
   let started;

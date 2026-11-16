@@ -1,11 +1,15 @@
 // Draft lifecycle primitives; not connected to any endpoint or scheduler.
-// Callers must authenticate/authorize the user and protect the administrator.
+// Callers must authenticate and authorize the user before calling.
 const GRACE_SECONDS = 30 * 24 * 60 * 60;
 
-export async function requestDeletion(db, userId, now) {
+export async function requestDeletion(db, userId, now, protectedAdminEmail) {
+	if (typeof protectedAdminEmail !== 'string' || !protectedAdminEmail.trim()) {
+		throw new Error('Administrator identity is required');
+	}
 	return withAccountLock(db, userId, async () => {
 		const result = await db.batch([
-			db.prepare('UPDATE user SET is_del = 1 WHERE user_id = ? AND is_del = 0').bind(userId),
+			db.prepare('UPDATE user SET is_del = 1 WHERE user_id = ? AND is_del = 0 AND email COLLATE NOCASE != ?')
+				.bind(userId, protectedAdminEmail.trim()),
 			db.prepare(`INSERT INTO account_deletion_request (user_id, requested_at, purge_after, state)
 				SELECT ?, ?, ?, 'pending' WHERE changes() = 1`).bind(userId, now, now + GRACE_SECONDS),
 			db.prepare(`INSERT INTO account_session_generation (user_id, generation)

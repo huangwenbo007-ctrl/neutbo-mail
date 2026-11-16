@@ -2,7 +2,7 @@ import { SELF, env, fetchMock } from 'cloudflare:test';
 import { beforeEach, afterEach, expect, it } from 'vitest';
 import settingService from '../src/service/setting-service';
 import { sign } from 'hono/jwt';
-import { requestDeletion, restoreDeletion, claimDeletion, stagePurge } from '../src/service/account-deletion-state';
+import { requestDeletion as requestDeletionRaw, restoreDeletion, claimDeletion, stagePurge } from '../src/service/account-deletion-state';
 import jwtUtils from '../src/utils/jwt-utils';
 import userService from '../src/service/user-service';
 import { email as receiveEmail } from '../src/email/email';
@@ -11,6 +11,8 @@ import emailService from '../src/service/email-service';
 import fileUtils from '../src/utils/file-utils';
 import { checkPasswordReauth } from '../src/service/account-reauth-draft';
 import { acquireObjectLock, releaseObjectLock } from '../src/service/account-deletion-state';
+
+const requestDeletion = (db, userId, now) => requestDeletionRaw(db, userId, now, 'admin@example.com');
 
 beforeEach(async () => {
   fetchMock.activate();
@@ -127,6 +129,17 @@ it('allows administrator recovery during the grace period but blocks it after ex
   expect(await requestDeletion(env.db, user.user_id, now - 31 * 86400)).toBe(true);
   await expect(userService.restore({env}, {userId:user.user_id})).rejects.toThrow('恢复期已结束');
   expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(1);
+});
+
+it('refuses a deletion request for the configured administrator', async () => {
+  const verified = await proof('administrator-owner@external.test');
+  expect((await post('/register', {email:'administrator@example.com', password:'test-password', ...verified})).code).toBe(200);
+  const admin = await env.db.prepare("SELECT user_id FROM user WHERE email='administrator@example.com'").first();
+  const now = Math.floor(Date.now() / 1000);
+  await expect(requestDeletionRaw(env.db, admin.user_id, now)).rejects.toThrow('Administrator identity is required');
+  expect(await requestDeletionRaw(env.db, admin.user_id, now, 'Administrator@Example.com')).toBe(false);
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(admin.user_id).first()).is_del).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_deletion_request WHERE user_id=?').bind(admin.user_id).first()).n).toBe(0);
 });
 
 it('does not stage an accidentally reactivated account for purge in D1', async () => {

@@ -11,6 +11,7 @@ Do not deploy this branch. The deletion endpoint and scheduler are deliberately 
 ## Implemented in this draft
 
 - D1 state transitions mark a user deleted, record the deadline, increment the session generation, allow an atomic pre-deadline restoration, and claim an expired request for purge.
+- The deletion primitive requires the configured administrator email and refuses to mark that account deleted. Callers must obtain this value from trusted server configuration, not the request; other privileged roles still require review.
 - Login and protected API requests read the account status and generation from D1. Old tokens become invalid even after a restoration; tokens issued before this migration are treated as generation zero.
 - Administrator restoration is guarded against expiry and concurrent purge; new incoming mail is rejected for deleted accounts.
 - The prototype coordinates deletion transitions with inbound and on-site recipient writes using a per-account reservation, and rechecks the recipient before saving. Isolated Workers tests cover normal delivery, deleted recipients and lock contention. This does not cover every writer or older deployed workers, and lock contention currently raises an error whose SMTP retry behavior has not been verified.
