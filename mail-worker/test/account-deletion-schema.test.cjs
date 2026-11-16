@@ -5,6 +5,24 @@ const { DatabaseSync } = require('node:sqlite');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 
+test('migration can be repeated without changing existing mailbox data', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE user (user_id INTEGER PRIMARY KEY, email TEXT NOT NULL);
+    CREATE TABLE email (email_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, subject TEXT);
+    CREATE TABLE attachments (att_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, key TEXT NOT NULL);
+    INSERT INTO user VALUES (1, 'existing@example.test');
+    INSERT INTO email VALUES (2, 1, 'existing message');
+    INSERT INTO attachments VALUES (3, 1, 'attachments/existing');`);
+  const migration = readFileSync(join(__dirname, '../migrations/account-deletion-draft.sql'), 'utf8');
+  db.exec(migration);
+  db.exec(migration);
+  assert.equal(db.prepare('SELECT email FROM user WHERE user_id=1').get().email, 'existing@example.test');
+  assert.equal(db.prepare('SELECT subject FROM email WHERE email_id=2').get().subject, 'existing message');
+  assert.equal(db.prepare('SELECT key FROM attachments WHERE att_id=3').get().key, 'attachments/existing');
+  assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='account_session_generation'").get().n, 1);
+  db.close();
+});
+
 test('enforces the recovery period and known lifecycle states', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(readFileSync(join(__dirname, '../migrations/account-deletion-draft.sql'), 'utf8'));

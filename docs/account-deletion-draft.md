@@ -26,6 +26,7 @@ Do not deploy this branch. The deletion endpoint and scheduler are deliberately 
 - Staging clears the deleted creator's references in shared roles and invitation codes while retaining those records. Isolated tests cover preservation and other users' references; operational and privacy review is still required.
 - Draft per-object reservations and queue processing have isolated SQLite tests for shared references, failed deletion, retry and lock contention. Incoming, outgoing, inline and on-site-copy draft paths use the reservation. Targeted Workers tests cover incoming/outgoing contention and stale on-site references; the scheduler remains disconnected and this does not yet protect actual attachments.
 - Workers binding tests also exercise shared-file preservation and failure/retry with D1 and KV. An independent Cloudflare preview database, KV namespace, and preview-only JWT secret were configured; a disposable test account successfully logged in, rejected a wrong password, requested deletion, and had its old session rejected. D1 recorded the pending request with a 30-day interval. The preview still requires complete recovery, Google identity and cleanup tests; it is not production-ready.
+- Applied the draft schema twice to the disposable Cloudflare preview database and checked that existing user, account and pending-request counts remained unchanged. Production schema was inspected read-only; none of the six new lifecycle tables existed at that time. No production migration has been run.
 
 ## Release blockers
 
