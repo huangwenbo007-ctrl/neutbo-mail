@@ -8,7 +8,7 @@ export function resetPassword(password) {
     return http.put('/my/resetPassword', {password})
 }
 
-export function userDelete() {
-    return http.delete('/my/delete')
+export function requestDeletion(password) {
+    return http.post('/my/delete/request', {password, confirmation:'DELETE'})
 }
 

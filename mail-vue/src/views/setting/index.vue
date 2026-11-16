@@ -63,10 +63,10 @@
     <div class="del-email" v-perm="'my:delete'">
       <div class="title">{{$t('deleteUser')}}</div>
       <div style="color: var(--regular-text-color);">
-        {{$t('delAccountMsg')}}
+        {{ deletionDraftEnabled ? $t('deletionGraceInfo') : $t('deletionUnavailable') }}
       </div>
       <div>
-        <el-button type="primary" @click="deleteConfirm">{{$t('deleteUserBtn')}}</el-button>
+        <el-button type="danger" :disabled="!deletionDraftEnabled" @click="deleteDialogVisible = true">{{$t('deleteUserBtn')}}</el-button>
       </div>
     </div>
     <el-dialog v-model="pwdShow" :title="$t('changePassword')" width="340">
@@ -76,13 +76,23 @@
         <el-button type="primary" :loading="setPwdLoading" @click="submitPwd">{{$t('save')}}</el-button>
       </div>
     </el-dialog>
+    <el-dialog v-model="deleteDialogVisible" :title="$t('deleteUser')" width="min(420px, 90vw)" @closed="deletePassword = ''">
+      <p>{{ $t('deletionGraceInfo') }}</p>
+      <p>{{ $t('deletionOAuthHelp') }}</p>
+      <el-input v-model="deletePassword" type="password" show-password autocomplete="current-password"
+        :placeholder="$t('deletionCurrentPassword')" @keyup.enter="submitDeletion" />
+      <template #footer>
+        <el-button @click="deleteDialogVisible = false">{{ $t('cancel') }}</el-button>
+        <el-button type="danger" :loading="deleteLoading" @click="submitDeletion">{{ $t('deletionSubmit') }}</el-button>
+      </template>
+    </el-dialog>
   </div>
     </el-scrollbar>
   </div>
 </template>
 <script setup>
 import {reactive, ref, defineOptions} from 'vue'
-import {resetPassword, userDelete} from "@/request/my.js";
+import {resetPassword, requestDeletion} from "@/request/my.js";
 import {useUserStore} from "@/store/user.js";
 import router from "@/router/index.js";
 import {accountSetName} from "@/request/account.js";
@@ -162,22 +172,31 @@ const form = reactive({
   newPwd: '',
 })
 
-const deleteConfirm = () => {
-  ElMessageBox.confirm(t('delAccountConfirm'), {
-    confirmButtonText: t('confirm'),
-    cancelButtonText: t('cancel'),
-    type: 'warning'
-  }).then(() => {
-    userDelete().then(() => {
-      localStorage.removeItem('token');
-      router.replace('/login');
-      ElMessage({
-        message: t('delSuccessMsg'),
-        type: 'success',
-        plain: true,
-      })
-    })
-  })
+// This build-time switch is for disposable environments only.
+const deletionDraftEnabled = import.meta.env.VITE_ACCOUNT_DELETION_TEST_ONLY === 'enabled'
+const deleteDialogVisible = ref(false)
+const deletePassword = ref('')
+const deleteLoading = ref(false)
+
+async function submitDeletion() {
+  if (deleteLoading.value || !deletionDraftEnabled) return
+  if (!deletePassword.value) {
+    ElMessage.error(t('deletionCurrentPassword'))
+    return
+  }
+  deleteLoading.value = true
+  try {
+    await requestDeletion(deletePassword.value)
+    deletePassword.value = ''
+    deleteDialogVisible.value = false
+    localStorage.removeItem('token')
+    await router.replace('/login')
+    ElMessage.success(t('deletionRequested'))
+  } catch (_) {
+    // The request interceptor reports the error; do not treat it as success.
+  } finally {
+    deleteLoading.value = false
+  }
 }
 
 
