@@ -114,6 +114,8 @@ router.beforeEach((to, from, next) => {
     }
 
     if (token && to.path.startsWith('/login')) {
+        const deletionState = sessionStorage.getItem('googleDeletionState')
+        if (deletionState && to.query.state === deletionState && (to.query.code || to.query.error)) return next()
         return next(from.path)
     }
 

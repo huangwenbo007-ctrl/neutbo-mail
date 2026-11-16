@@ -47,6 +47,8 @@ const userService = {
 		user.permKeys = permKeys;
 		user.role = roleRow;
 		user.type = userRow.type;
+		const googleLink = await c.env.db.prepare("SELECT 1 AS linked FROM oauth WHERE user_id=? AND platform='google' AND oauth_user_id IS NOT NULL LIMIT 1").bind(userId).first();
+		user.googleLinked = Boolean(googleLink);
 
 		if (c.env.admin === userRow.email) {
 			user.role = constant.ADMIN_ROLE

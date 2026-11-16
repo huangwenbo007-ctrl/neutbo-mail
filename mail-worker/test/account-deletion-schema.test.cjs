@@ -115,6 +115,8 @@ test('stages attachment keys and removes only the claimed user metadata', async 
     INSERT INTO email VALUES (11, 1), (22, 2); INSERT INTO account VALUES (1), (2);
     INSERT INTO inbound_attachment_failure VALUES (11, 'partial', 10), (22, 'other-partial', 10);
     INSERT INTO role VALUES (10, 1), (20, 2); INSERT INTO reg_key VALUES (100, 1), (200, 2);
+    INSERT INTO account_reauth_rate VALUES (1, 10, 1), (2, 10, 1);
+    INSERT INTO google_deletion_challenge VALUES (1, 'one', 'session', 'nonce', 'verifier', 'subject', 100), (2, 'two', 'session', 'nonce', 'verifier', 'subject', 100);
     INSERT INTO account_deletion_request VALUES (1, 0, 2592000, 'pending');`);
   const db = {
     prepare(sql) { return { bind(...args) { return {run() { return {meta:{changes:Number(raw.prepare(sql).run(...args).changes)}}; }}; } }; },
@@ -148,6 +150,10 @@ test('stages attachment keys and removes only the claimed user metadata', async 
   assert.equal(raw.prepare('SELECT user_id FROM role WHERE role_id=20').get().user_id, 2);
   assert.equal(raw.prepare('SELECT user_id FROM reg_key WHERE rege_key_id=100').get().user_id, 0);
   assert.equal(raw.prepare('SELECT user_id FROM reg_key WHERE rege_key_id=200').get().user_id, 2);
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM account_reauth_rate WHERE user_id=1').get().n, 0);
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM account_reauth_rate WHERE user_id=2').get().n, 1);
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM google_deletion_challenge WHERE user_id=1').get().n, 0);
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM google_deletion_challenge WHERE user_id=2').get().n, 1);
   raw.close();
 });
 

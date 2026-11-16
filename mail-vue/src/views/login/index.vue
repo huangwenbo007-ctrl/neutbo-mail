@@ -186,7 +186,7 @@ import {useUserStore} from "@/store/user.js";
 import {useUiStore} from "@/store/ui.js";
 import {Icon} from "@iconify/vue";
 import {cvtR2Url} from "@/utils/convert.js";
-import {loginUserInfo} from "@/request/my.js";
+import {loginUserInfo, completeGoogleDeletion} from "@/request/my.js";
 import {permsToRouter} from "@/perm/perm.js";
 import {useI18n} from "vue-i18n";
 import {oauthBindUser, oauthLinuxDoLogin, oauthGithubLogin, oauthGoogleLogin} from "@/request/ouath.js";
@@ -396,6 +396,28 @@ async function oauthGetUser() {
 
   const params = new URLSearchParams(window.location.search)
   const code = params.get('code')
+  const deletionState = sessionStorage.getItem('googleDeletionState')
+  if (deletionState && params.get('state') === deletionState) {
+    sessionStorage.removeItem('googleDeletionState')
+    window.history.replaceState({}, '', window.location.origin + window.location.pathname)
+    if (!code || params.get('error')) {
+      ElMessage.error(t('deletionGoogleFailed'))
+      await router.replace('/settings')
+      return
+    }
+    oauthLoading.value = true
+    try {
+      await completeGoogleDeletion(code, deletionState)
+      localStorage.removeItem('token')
+      ElMessage.success(t('deletionRequested'))
+    } catch (_) {
+      ElMessage.error(t('deletionGoogleFailed'))
+      await router.replace('/settings')
+    } finally {
+      oauthLoading.value = false
+    }
+    return
+  }
   if (!code) return
 
   const provider = sessionStorage.getItem('oauthProvider')

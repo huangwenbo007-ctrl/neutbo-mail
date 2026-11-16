@@ -17,6 +17,7 @@ export default defineWorkersConfig({
             jwt_secret: 'local-integration-tests-only',
             orm_log: false,
             account_deletion_test_only: 'enabled',
+            google_reauth_redirect_uri: 'https://local.test/login',
           },
         },
       },

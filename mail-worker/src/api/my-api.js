@@ -4,6 +4,7 @@ import result from '../model/result';
 import userContext from '../security/user-context';
 import BizError from '../error/biz-error';
 import { requestPasswordDeletion, changePasswordWithReauth } from '../service/account-reauth-draft';
+import { startGoogleDeletion, completeGoogleDeletion } from '../service/google-deletion-draft';
 
 app.get('/my/loginUserInfo', async (c) => {
 	const user = await userService.loginUserInfo(c, userContext.getUserId(c));
@@ -35,6 +36,16 @@ app.post('/my/delete/request', async (c) => {
 	const ok = await requestPasswordDeletion(c.env.db, userContext.getUserId(c), body.password, now, c.env.admin);
 	if (!ok) throw new BizError('无法提交申请，请检查密码或稍后再试');
 	return c.json(result.ok({ recoverUntil: now + 2592000 }));
+});
+
+app.post('/my/delete/google/start', async (c) => {
+	if (c.env.account_deletion_test_only !== 'enabled') throw new BizError('账号删除功能暂不可用');
+	return c.json(result.ok(await startGoogleDeletion(c)));
+});
+
+app.post('/my/delete/google/complete', async (c) => {
+	if (c.env.account_deletion_test_only !== 'enabled') throw new BizError('账号删除功能暂不可用');
+	return c.json(result.ok(await completeGoogleDeletion(c, await c.req.json())));
 });
 
 

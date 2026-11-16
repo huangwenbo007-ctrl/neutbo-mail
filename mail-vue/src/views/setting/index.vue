@@ -85,6 +85,7 @@
         :placeholder="$t('deletionCurrentPassword')" @keyup.enter="submitDeletion" />
       <template #footer>
         <el-button @click="deleteDialogVisible = false">{{ $t('cancel') }}</el-button>
+        <el-button v-if="userStore.user.googleLinked" :loading="deleteLoading" @click="submitGoogleDeletion">{{ $t('deletionWithGoogle') }}</el-button>
         <el-button type="danger" :loading="deleteLoading" @click="submitDeletion">{{ $t('deletionSubmit') }}</el-button>
       </template>
     </el-dialog>
@@ -94,7 +95,7 @@
 </template>
 <script setup>
 import {reactive, ref, defineOptions} from 'vue'
-import {resetPassword, requestDeletion} from "@/request/my.js";
+import {resetPassword, requestDeletion, startGoogleDeletion} from "@/request/my.js";
 import {useUserStore} from "@/store/user.js";
 import router from "@/router/index.js";
 import {accountSetName} from "@/request/account.js";
@@ -204,6 +205,22 @@ async function submitDeletion() {
   } catch (_) {
     // The request interceptor reports the error; do not treat it as success.
   } finally {
+    deleteLoading.value = false
+  }
+}
+
+async function submitGoogleDeletion() {
+  if (deleteLoading.value || !deletionDraftEnabled) return
+  deleteLoading.value = true
+  try {
+    const data = await startGoogleDeletion()
+    const url = new URL(data.url)
+    const state = url.searchParams.get('state')
+    if (url.origin !== 'https://accounts.google.com' || url.pathname !== '/o/oauth2/v2/auth' || !/^[a-f0-9]{64}$/.test(state || '')) throw new Error('Invalid Google authorization request')
+    sessionStorage.setItem('googleDeletionState', state)
+    window.location.assign(url.toString())
+  } catch (_) {
+    ElMessage.error(t('deletionGoogleFailed'))
     deleteLoading.value = false
   }
 }

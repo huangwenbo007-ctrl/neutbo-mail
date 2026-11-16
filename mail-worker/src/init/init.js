@@ -48,6 +48,10 @@ const dbInit = {
 			user_id INTEGER PRIMARY KEY, window_start INTEGER NOT NULL,
 			attempts INTEGER NOT NULL CHECK (attempts BETWEEN 1 AND 5)
 		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS google_deletion_challenge (
+			user_id INTEGER PRIMARY KEY, state TEXT NOT NULL UNIQUE, session_hash TEXT NOT NULL,
+			nonce TEXT NOT NULL, verifier TEXT NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL
+		)`).run();
 		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_deletion_request (
 			user_id INTEGER PRIMARY KEY, requested_at INTEGER NOT NULL, purge_after INTEGER NOT NULL,
 			state TEXT NOT NULL CHECK (state IN ('pending', 'purging')),

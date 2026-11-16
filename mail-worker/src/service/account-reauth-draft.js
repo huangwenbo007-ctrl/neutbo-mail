@@ -15,9 +15,8 @@ async function verifyPassword(password, salt, storedHash) {
 	return crypto.subtle.timingSafeEqual(candidate, expected);
 }
 
-async function passwordSnapshot(db, userId, password, now) {
-	if (!Number.isSafeInteger(userId) || userId <= 0 || !Number.isSafeInteger(now) || now < 0 ||
-		typeof password !== 'string' || password.length < 1 || password.length > 128) return null;
+export async function reserveReauthAttempt(db, userId, now) {
+	if (!Number.isSafeInteger(userId) || userId <= 0 || !Number.isSafeInteger(now) || now < 0) return false;
 	// One D1 statement reserves each attempt, including successful attempts.
 	// Do not reset on success: concurrent attempts cannot extend the allowance.
 	const attempt = await db.prepare(`INSERT INTO account_reauth_rate (user_id, window_start, attempts)
@@ -26,7 +25,12 @@ async function passwordSnapshot(db, userId, password, now) {
 		attempts = CASE WHEN window_start <= ? THEN 1 ELSE attempts + 1 END
 		WHERE window_start <= ? OR attempts < 5 RETURNING attempts`)
 		.bind(userId, now, now - 900, now - 900, now - 900).first();
-	if (!attempt) return null;
+	return Boolean(attempt);
+}
+
+async function passwordSnapshot(db, userId, password, now) {
+	if (typeof password !== 'string' || password.length < 1 || password.length > 128) return null;
+	if (!await reserveReauthAttempt(db, userId, now)) return null;
 	const user = await db.prepare('SELECT salt, password FROM user WHERE user_id = ? AND is_del = 0 AND status = 0')
 		.bind(userId).first();
 	if (!user || typeof user.salt !== 'string' || typeof user.password !== 'string') return null;

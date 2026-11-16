@@ -24,6 +24,17 @@ CREATE TABLE IF NOT EXISTS account_reauth_rate (
   attempts INTEGER NOT NULL CHECK (attempts BETWEEN 1 AND 5)
 );
 
+-- One pending Google reauthentication per account. Never stores Google tokens.
+CREATE TABLE IF NOT EXISTS google_deletion_challenge (
+  user_id INTEGER PRIMARY KEY,
+  state TEXT NOT NULL UNIQUE,
+  session_hash TEXT NOT NULL,
+  nonce TEXT NOT NULL,
+  verifier TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
 -- This queue is only a schema sketch. Shared content-addressed objects require
 -- coordination with every upload/attachment writer before deletion is safe.
 CREATE TABLE IF NOT EXISTS account_deletion_object_queue (

@@ -12,3 +12,11 @@ export function requestDeletion(password) {
     return http.post('/my/delete/request', {password, confirmation:'DELETE'})
 }
 
+export function startGoogleDeletion() {
+    return http.post('/my/delete/google/start', {})
+}
+
+export function completeGoogleDeletion(code, state) {
+    return http.post('/my/delete/google/complete', {code, state, confirmation:'DELETE'})
+}
+

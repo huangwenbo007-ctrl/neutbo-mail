@@ -11,6 +11,8 @@ import emailService from '../src/service/email-service';
 import fileUtils from '../src/utils/file-utils';
 import app from '../src/hono/webs';
 import { checkPasswordReauth, requestPasswordDeletion, changePasswordWithReauth } from '../src/service/account-reauth-draft';
+import { verifyGoogleReauthToken } from '../src/service/google-reauth-draft';
+import { commitGoogleDeletion } from '../src/service/google-deletion-draft';
 import { acquireObjectLock, releaseObjectLock } from '../src/service/account-deletion-state';
 
 const requestDeletion = (db, userId, now) => requestDeletionRaw(db, userId, now, 'admin@example.com');
@@ -46,6 +48,128 @@ async function proof(address = 'receiver@external.test') {
   expect(result.code).toBe(200);
   return {externalEmail:address, emailChallenge:result.data.challenge, emailVerificationCode:sentCode};
 }
+
+it('verifies Google reauthentication signatures and rejects invalid identity claims', async () => {
+  const algorithm = {name:'RSASSA-PKCS1-v1_5', modulusLength:2048, publicExponent:new Uint8Array([1,0,1]), hash:'SHA-256'};
+  const pair = await crypto.subtle.generateKey(algorithm, true, ['sign','verify']);
+  const other = await crypto.subtle.generateKey(algorithm, true, ['sign','verify']);
+  const publicKey = {...await crypto.subtle.exportKey('jwk', pair.publicKey), kid:'test-key', alg:'RS256', use:'sig'};
+  const privateKey = {...await crypto.subtle.exportKey('jwk', pair.privateKey), kid:'test-key', alg:'RS256'};
+  const forgedKey = {...await crypto.subtle.exportKey('jwk', other.privateKey), kid:'test-key', alg:'RS256'};
+  const now = Math.floor(Date.now()/1000);
+  const nonce = 'test_nonce_012345678901234567890123456789';
+  const claims = {iss:'https://accounts.google.com', sub:'google-owner', aud:'test-client',
+    nonce, iat:now, auth_time:now, exp:now+300};
+  async function check(payload, key = privateKey) {
+    const token = await sign(payload, key, 'RS256');
+    fetchMock.get('https://www.googleapis.com').intercept({path:'/oauth2/v3/certs', method:'GET'})
+      .reply(200, JSON.stringify({keys:[publicKey]}));
+    return verifyGoogleReauthToken(token, 'test-client', nonce, 'google-owner', now);
+  }
+  expect(await check(claims)).toBe(true);
+  expect(await check(claims, forgedKey)).toBe(false);
+  expect(await check({...claims, sub:'different-user'})).toBe(false);
+  expect(await check({...claims, iss:'https://not-google.example'})).toBe(false);
+  expect(await check({...claims, aud:'another-client'})).toBe(false);
+  expect(await check({...claims, nonce:'different_nonce_012345678901234567890123'})).toBe(false);
+  expect(await check({...claims, auth_time:now-301})).toBe(false);
+  expect(await check({...claims, auth_time:undefined})).toBe(false);
+  expect(await check({...claims, exp:now-1})).toBe(false);
+  expect(await check({...claims, aud:['test-client','other'], azp:'other'})).toBe(false);
+});
+
+it('binds Google deletion to a fresh one-use challenge and the original session', async () => {
+  const verified = await proof('google-delete-owner@external.test');
+  expect((await post('/register', {email:'google-delete@example.com', password:'test-password', ...verified})).code).toBe(200);
+  const user = await env.db.prepare("SELECT user_id FROM user WHERE email='google-delete@example.com'").first();
+  await env.db.prepare("INSERT INTO oauth (user_id,platform,oauth_user_id) VALUES (?,'google','google-delete-subject')").bind(user.user_id).run();
+  await env.db.prepare('INSERT OR IGNORE INTO role_perm (role_id,perm_id) VALUES (1,5)').run();
+  await env.db.prepare("UPDATE setting SET google_switch=0, google_client_id='test-client', google_client_secret='test-secret'").run();
+  await refresh();
+  const first = await post('/login', {email:'google-delete@example.com', password:'test-password'});
+  const second = await post('/login', {email:'google-delete@example.com', password:'test-password'});
+  expect(first.code).toBe(200);
+  expect(second.code).toBe(200);
+  const send = async (path, token, body = {}) => (await SELF.fetch('https://local.test/api' + path, {
+    method:'POST', headers:{Authorization:token, 'Content-Type':'application/json', 'CF-Connecting-IP':'192.0.2.20'}, body:JSON.stringify(body),
+  })).json();
+  const started = await send('/my/delete/google/start', first.data.token);
+  expect(started.code).toBe(200);
+  const auth = new URL(started.data.url);
+  expect(auth.origin).toBe('https://accounts.google.com');
+  expect(auth.searchParams.get('redirect_uri')).toBe('https://local.test/login');
+  expect(auth.searchParams.get('prompt')).toBe('login');
+  expect(auth.searchParams.get('max_age')).toBe('0');
+  const state = auth.searchParams.get('state'), nonce = auth.searchParams.get('nonce');
+  const payload = {state, code:'test-authorization-code', confirmation:'DELETE'};
+  expect((await send('/my/delete/google/complete', second.data.token, payload)).code).not.toBe(200);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM google_deletion_challenge WHERE user_id=?').bind(user.user_id).first()).n).toBe(1);
+  expect((await send('/my/delete/google/complete', first.data.token, {...payload, confirmation:'no'})).code).not.toBe(200);
+  const pair = await crypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5', modulusLength:2048, publicExponent:new Uint8Array([1,0,1]), hash:'SHA-256'}, true, ['sign','verify']);
+  const privateKey = {...await crypto.subtle.exportKey('jwk', pair.privateKey), kid:'google-test', alg:'RS256'};
+  const publicKey = {...await crypto.subtle.exportKey('jwk', pair.publicKey), kid:'google-test', alg:'RS256', use:'sig'};
+  const now = Math.floor(Date.now()/1000);
+  const idToken = await sign({iss:'https://accounts.google.com', sub:'google-delete-subject', aud:'test-client',
+    nonce, iat:now, auth_time:now, exp:now+300}, privateKey, 'RS256');
+  fetchMock.get('https://oauth2.googleapis.com').intercept({path:'/token',method:'POST'}).reply(200, options => {
+    const form = new URLSearchParams(options.body);
+    expect(form.get('code')).toBe('test-authorization-code');
+    expect(form.get('redirect_uri')).toBe('https://local.test/login');
+    expect(form.get('code_verifier')).toMatch(/^[a-f0-9]{64}$/);
+    return JSON.stringify({id_token:idToken});
+  });
+  fetchMock.get('https://www.googleapis.com').intercept({path:'/oauth2/v3/certs',method:'GET'}).reply(200, JSON.stringify({keys:[publicKey]}));
+  const done = await send('/my/delete/google/complete', first.data.token, payload);
+  expect(done.code).toBe(200);
+  const request = await env.db.prepare('SELECT state,purge_after,requested_at FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first();
+  expect(request.state).toBe('pending');
+  expect(request.purge_after - request.requested_at).toBe(2592000);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM google_deletion_challenge WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+  expect((await send('/my/delete/google/complete', first.data.token, payload)).code).not.toBe(200);
+});
+
+it('consumes failed Google challenges and rejects expired ones without deleting the user', async () => {
+  const verified = await proof('google-failure-owner@external.test');
+  expect((await post('/register', {email:'google-failure@example.com', password:'test-password', ...verified})).code).toBe(200);
+  const user = await env.db.prepare("SELECT user_id FROM user WHERE email='google-failure@example.com'").first();
+  await env.db.prepare("INSERT INTO oauth (user_id,platform,oauth_user_id) VALUES (?,'google','google-failure-subject')").bind(user.user_id).run();
+  await env.db.prepare('INSERT OR IGNORE INTO role_perm (role_id,perm_id) VALUES (1,5)').run();
+  await env.db.prepare("UPDATE setting SET google_switch=0, google_client_id='test-client', google_client_secret='test-secret'").run();
+  await refresh();
+  const login = await post('/login', {email:'google-failure@example.com', password:'test-password'});
+  const send = async (path, body = {}) => (await SELF.fetch('https://local.test/api' + path, {
+    method:'POST', headers:{Authorization:login.data.token, 'Content-Type':'application/json'}, body:JSON.stringify(body),
+  })).json();
+  const first = await send('/my/delete/google/start');
+  const payload = {state:new URL(first.data.url).searchParams.get('state'), code:'bad-code', confirmation:'DELETE'};
+  fetchMock.get('https://oauth2.googleapis.com').intercept({path:'/token',method:'POST'}).reply(400, JSON.stringify({error:'private-provider-detail'}));
+  const failed = await send('/my/delete/google/complete', payload);
+  expect(failed.code).not.toBe(200);
+  expect(failed.message).not.toContain('private-provider-detail');
+  expect((await send('/my/delete/google/complete', payload)).code).not.toBe(200);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM google_deletion_challenge WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+  const second = await send('/my/delete/google/start');
+  const expired = {state:new URL(second.data.url).searchParams.get('state'), code:'unused-code', confirmation:'DELETE'};
+  await env.db.prepare('UPDATE google_deletion_challenge SET expires_at=0 WHERE user_id=?').bind(user.user_id).run();
+  expect((await send('/my/delete/google/complete', expired)).code).not.toBe(200);
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+});
+
+it('does not delete after the session generation or linked Google identity changes', async () => {
+  const verified = await proof('google-race-owner@external.test');
+  expect((await post('/register', {email:'google-race@example.com', password:'test-password', ...verified})).code).toBe(200);
+  const user = await env.db.prepare("SELECT user_id FROM user WHERE email='google-race@example.com'").first();
+  await env.db.prepare("INSERT INTO oauth (user_id,platform,oauth_user_id) VALUES (?,'google','new-google-subject')").bind(user.user_id).run();
+  await env.db.prepare('INSERT INTO account_session_generation (user_id,generation) VALUES (?,2)').bind(user.user_id).run();
+  const now = Math.floor(Date.now()/1000);
+  expect(await commitGoogleDeletion(env.db, user.user_id, 'admin@example.com', 'new-google-subject', 1, now)).toBe(false);
+  expect(await commitGoogleDeletion(env.db, user.user_id, 'admin@example.com', 'old-google-subject', 2, now)).toBe(false);
+  expect(await commitGoogleDeletion(env.db, user.user_id, 'Google-Race@Example.com', 'new-google-subject', 2, now)).toBe(false);
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+  expect(await commitGoogleDeletion(env.db, user.user_id, 'admin@example.com', 'new-google-subject', 2, now)).toBe(true);
+});
 
 it('initializes the verification schema and rejects registration without email proof', async () => {
   const response = await SELF.fetch('https://local.test/api/register', {
