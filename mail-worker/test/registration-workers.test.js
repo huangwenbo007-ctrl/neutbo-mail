@@ -111,6 +111,20 @@ it('does not overwrite a password changed concurrently after verification', asyn
   expect((await env.db.prepare('SELECT count(*) AS n FROM account_session_generation WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
 });
 
+it('invalidates existing sessions when an administrator resets a password', async () => {
+  const verified = await proof('admin-reset-owner@external.test');
+  expect((await post('/register', {email:'admin-reset@example.com', password:'test-password', ...verified})).code).toBe(200);
+  const login = await post('/login', {email:'admin-reset@example.com', password:'test-password'});
+  expect(login.code).toBe(200);
+  const user = await env.db.prepare("SELECT user_id FROM user WHERE email='admin-reset@example.com'").first();
+  await userService.setPwd({env}, {userId:user.user_id, password:'replacement-password'});
+  expect((await env.db.prepare('SELECT generation FROM account_session_generation WHERE user_id=?').bind(user.user_id).first()).generation).toBe(1);
+  const oldSession = await SELF.fetch('https://local.test/api/my/loginUserInfo', {headers:{Authorization:login.data.token}});
+  expect((await oldSession.json()).code).not.toBe(200);
+  expect((await post('/login', {email:'admin-reset@example.com', password:'test-password'})).code).not.toBe(200);
+  expect((await post('/login', {email:'admin-reset@example.com', password:'replacement-password'})).code).toBe(200);
+});
+
 it('limits concurrent password reauthentication attempts per account', async () => {
   const verified = await proof('reauth-owner@external.test');
   expect((await post('/register', {email:'reauth@example.com', password:'test-password', ...verified})).code).toBe(200);

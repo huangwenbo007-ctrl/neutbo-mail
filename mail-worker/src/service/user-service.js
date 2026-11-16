@@ -20,7 +20,7 @@ import {oauth} from "../entity/oauth";
 import oauthService from "./oauth-service";
 import settingService from './setting-service';
 import starService from './star-service';
-import { restoreDeletion, withAccountLocks } from './account-deletion-state';
+import { restoreDeletion, withAccountLock, withAccountLocks } from './account-deletion-state';
 
 const userService = {
 
@@ -61,11 +61,18 @@ const userService = {
 
 		const { password } = params;
 
-		if (password.length < 6) {
+		if (typeof password !== 'string' || password.length < 6 || password.length > 30) {
 			throw new BizError(t('pwdMinLength'));
 		}
 		const { salt, hash } = await cryptoUtils.hashPassword(password);
-		await orm(c).update(user).set({ password: hash, salt: salt }).where(eq(user.userId, userId)).run();
+		return withAccountLock(c.env.db, userId, async () => {
+			const result = await c.env.db.batch([
+				c.env.db.prepare('UPDATE user SET password = ?, salt = ? WHERE user_id = ?').bind(hash, salt, userId),
+				c.env.db.prepare(`INSERT INTO account_session_generation (user_id, generation)
+					SELECT ?, 1 WHERE changes() = 1 ON CONFLICT(user_id) DO UPDATE SET generation = generation + 1`).bind(userId),
+			]);
+			if (!result.every(item => item.meta.changes === 1)) throw new BizError('账号不存在或无法修改密码');
+		});
 	},
 
 	selectByEmail(c, email) {
