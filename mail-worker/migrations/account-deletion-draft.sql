@@ -69,6 +69,16 @@ CREATE TABLE IF NOT EXISTS attachment_object_lock (
   PRIMARY KEY(object_key)
 );
 
+-- An origin is usable only when recorded from a trusted, locked writer after
+-- a successful write. A conflicting origin is permanently ambiguous until a
+-- separately reviewed reconciliation; legacy objects have no trusted origin.
+CREATE TABLE IF NOT EXISTS attachment_object_origin (
+  object_key TEXT PRIMARY KEY,
+  storage_type TEXT NOT NULL CHECK (storage_type IN ('KV', 'R2', 'S3')),
+  store_id TEXT NOT NULL CHECK (length(store_id) > 0),
+  state TEXT NOT NULL CHECK (state IN ('known', 'ambiguous'))
+);
+
 -- Failed inbound attachment keys remain traceable for later investigation.
 CREATE TABLE IF NOT EXISTS inbound_attachment_failure (
   email_id INTEGER NOT NULL,

@@ -76,6 +76,10 @@ const dbInit = {
 		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS attachment_object_lock (
 			storage_type TEXT NOT NULL, object_key TEXT PRIMARY KEY, owner_token TEXT NOT NULL, created_at INTEGER NOT NULL
 		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS attachment_object_origin (
+			object_key TEXT PRIMARY KEY, storage_type TEXT NOT NULL CHECK (storage_type IN ('KV', 'R2', 'S3')),
+			store_id TEXT NOT NULL CHECK (length(store_id) > 0), state TEXT NOT NULL CHECK (state IN ('known', 'ambiguous'))
+		)`).run();
 		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS inbound_attachment_failure (
 			email_id INTEGER NOT NULL, object_key TEXT NOT NULL, recorded_at INTEGER NOT NULL,
 			PRIMARY KEY (email_id, object_key)

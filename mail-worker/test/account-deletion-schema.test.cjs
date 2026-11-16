@@ -70,34 +70,74 @@ test('a writer reserves all attachment keys or performs no write', async () => {
 });
 
 test('keeps shared objects and retries failed unshared object deletion', async () => {
-  const { processQueuedObject, acquireObjectLock } = await import('../src/service/account-deletion-state.js');
+  const { processQueuedObject, acquireObjectLock, releaseObjectLock, recordConfirmedObjectOrigin } = await import('../src/service/account-deletion-state.js');
   const raw = new DatabaseSync(':memory:');
   raw.exec(readFileSync(join(__dirname, '../migrations/account-deletion-draft.sql'), 'utf8'));
   raw.exec(`CREATE TABLE attachments (user_id INTEGER, key TEXT);
-    INSERT INTO attachments VALUES (2, 'shared');
-    INSERT INTO account_deletion_object_queue VALUES ('KV', 'shared', 1), ('KV', 'private', 1);`);
+    INSERT INTO attachments VALUES (2, 'attachments/shared');
+    INSERT INTO account_deletion_object_queue VALUES ('KV', 'attachments/shared', 1), ('KV', 'attachments/private', 1);`);
   const db = {prepare(sql) {return {bind(...args) {return {
     async run() {return {meta:{changes:Number(raw.prepare(sql).run(...args).changes)}};},
     async first() {return raw.prepare(sql).get(...args);},
   };}};}};
-  const shared = {userId:1, storageType:'KV', key:'shared'};
+  const target = {storageType:'KV',storeId:'isolated-test-kv'};
+  const shared = {userId:1, storageType:'KV', key:'attachments/shared'};
   let deletes = 0;
-  assert.equal(await processQueuedObject(db, shared, 'cleaner-shared', 100, async () => {deletes++;}), 'shared');
+  assert.equal(await processQueuedObject(db, shared, 'cleaner-shared', 100, async () => {deletes++;},target), 'shared');
   assert.equal(deletes, 0);
-  const own = {userId:1, storageType:'KV', key:'private'};
-  await assert.rejects(processQueuedObject(db, own, 'cleaner-fail', 101, async () => {throw new Error('storage unavailable');}));
-  assert.equal(raw.prepare("SELECT count(*) AS n FROM account_deletion_object_queue WHERE object_key='private'").get().n, 1);
+  assert.equal(raw.prepare("SELECT count(*) AS n FROM account_deletion_object_queue WHERE object_key='attachments/shared'").get().n, 1);
+  const own = {userId:1, storageType:'KV', key:'attachments/private'};
+  assert.equal(await processQueuedObject(db, own, 'cleaner-unknown', 100, async () => {deletes++;},target),'unresolved');
+  await assert.rejects(recordConfirmedObjectOrigin(db, own.key, 'KV', target.storeId, 'writer'), /reservation/);
+  assert.equal(await acquireObjectLock(db, 'KV', own.key, 'writer', 100), true);
+  await recordConfirmedObjectOrigin(db, own.key, 'KV', target.storeId, 'writer');
+  assert.equal(await releaseObjectLock(db, 'KV', own.key, 'writer'), true);
+  assert.equal(await processQueuedObject(db, own, 'cleaner-wrong', 100, async () => {deletes++;},{storageType:'KV',storeId:'other-kv'}),'unresolved');
+  assert.equal(deletes, 0);
+  await assert.rejects(processQueuedObject(db, own, 'cleaner-fail', 101, async () => {throw new Error('storage unavailable');},target));
+  assert.equal(raw.prepare("SELECT count(*) AS n FROM account_deletion_object_queue WHERE object_key='attachments/private'").get().n, 1);
   let unblock;
   let started;
   const ready = new Promise(resolve => { started = resolve; });
   const wait = new Promise(resolve => { unblock = resolve; });
-  const cleanup = processQueuedObject(db, own, 'cleaner-retry', 102, async () => {started(); await wait; deletes++;});
+  const cleanup = processQueuedObject(db, own, 'cleaner-retry', 102, async () => {started(); await wait; deletes++;},target);
   await ready;
-  assert.equal(await acquireObjectLock(db, 'KV', 'private', 'concurrent-writer', 103), false);
+  assert.equal(await acquireObjectLock(db, 'KV', 'attachments/private', 'concurrent-writer', 103), false);
   unblock();
   assert.equal(await cleanup, 'deleted');
   assert.equal(deletes, 1);
-  assert.equal(raw.prepare("SELECT count(*) AS n FROM account_deletion_object_queue WHERE object_key='private'").get().n, 0);
+  assert.equal(raw.prepare("SELECT count(*) AS n FROM account_deletion_object_queue WHERE object_key='attachments/private'").get().n, 0);
+  assert.equal(await acquireObjectLock(db,'KV',shared.key,'shared-writer',104),true);
+  await recordConfirmedObjectOrigin(db,shared.key,'KV',target.storeId,'shared-writer');
+  assert.equal(await releaseObjectLock(db,'KV',shared.key,'shared-writer'),true);
+  raw.prepare('DELETE FROM attachments WHERE key=?').run(shared.key);
+  assert.equal(await processQueuedObject(db,shared,'cleaner-after-last-ref',105,async()=>{deletes++},target),'deleted');
+  assert.equal(deletes,2);
+  raw.close();
+});
+
+test('marks conflicting attachment storage origins ambiguous and never deletes them', async () => {
+  const { recordConfirmedObjectOrigin, processQueuedObject, acquireObjectLock, releaseObjectLock } = await import('../src/service/account-deletion-state.js');
+  const raw = new DatabaseSync(':memory:');
+  raw.exec(readFileSync(join(__dirname, '../migrations/account-deletion-draft.sql'), 'utf8'));
+  raw.exec("CREATE TABLE attachments (user_id INTEGER, key TEXT); INSERT INTO account_deletion_object_queue VALUES ('KV','attachments/collision',1)");
+  const db={prepare(sql){return {bind(...args){return {
+    async run(){return {meta:{changes:Number(raw.prepare(sql).run(...args).changes)}}},
+    async first(){return raw.prepare(sql).get(...args)},
+  }}}}};
+  const key='attachments/collision';
+  assert.equal(await acquireObjectLock(db,'KV',key,'writer',1),true);
+  await recordConfirmedObjectOrigin(db,key,'KV','test-store-a','writer');
+  await recordConfirmedObjectOrigin(db,key,'KV','test-store-a','writer');
+  assert.equal(raw.prepare('SELECT state FROM attachment_object_origin WHERE object_key=?').get(key).state,'known');
+  await recordConfirmedObjectOrigin(db,key,'KV','test-store-b','writer');
+  await recordConfirmedObjectOrigin(db,key,'KV','test-store-a','writer');
+  assert.equal(await releaseObjectLock(db,'KV',key,'writer'),true);
+  assert.equal(raw.prepare('SELECT state FROM attachment_object_origin WHERE object_key=?').get(key).state,'ambiguous');
+  let deletes=0;
+  assert.equal(await processQueuedObject(db,{userId:1,storageType:'KV',key},'cleaner',10,async()=>{deletes++},{storageType:'KV',storeId:'test-store-a'}),'unresolved');
+  assert.equal(deletes,0);
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM account_deletion_object_queue').get().n,1);
   raw.close();
 });
 

@@ -2,7 +2,7 @@ import { SELF, env, fetchMock } from 'cloudflare:test';
 import { beforeEach, afterEach, expect, it } from 'vitest';
 import settingService from '../src/service/setting-service';
 import { sign } from 'hono/jwt';
-import { requestDeletion as requestDeletionRaw, restoreDeletion, claimDeletion, stagePurge, processQueuedObject } from '../src/service/account-deletion-state';
+import { requestDeletion as requestDeletionRaw, restoreDeletion, claimDeletion, stagePurge, processQueuedObject, recordConfirmedObjectOrigin } from '../src/service/account-deletion-state';
 import jwtUtils from '../src/utils/jwt-utils';
 import userService from '../src/service/user-service';
 import { email as receiveEmail } from '../src/email/email';
@@ -407,14 +407,18 @@ it('preserves shared attachments and retries failed cleanup in Workers bindings'
   await env.db.prepare("INSERT INTO account_deletion_object_queue VALUES ('KV', ?, 1), ('KV', ?, 1)").bind(shared, own).run();
   await env.kv.put(shared, 'shared data');
   await env.kv.put(own, 'private data');
+  const target = {storageType:'KV',storeId:'isolated-test-kv'};
+  expect(await acquireObjectLock(env.db,'KV',own,'test-writer',99)).toBe(true);
+  await recordConfirmedObjectOrigin(env.db, own, 'KV', target.storeId, 'test-writer');
+  expect(await releaseObjectLock(env.db,'KV',own,'test-writer')).toBe(true);
   const remove = async (_type, key) => env.kv.delete(key);
-  expect(await processQueuedObject(env.db, {userId:1, storageType:'KV', key:shared}, 'shared-cleaner', 100, remove)).toBe('shared');
+  expect(await processQueuedObject(env.db, {userId:1, storageType:'KV', key:shared}, 'shared-cleaner', 100, remove, target)).toBe('shared');
   expect(await env.kv.get(shared)).toBe('shared data');
   await expect(processQueuedObject(env.db, {userId:1, storageType:'KV', key:own}, 'failing-cleaner', 101,
-    async () => {throw new Error('storage unavailable');})).rejects.toThrow('storage unavailable');
+    async () => {throw new Error('storage unavailable');}, target)).rejects.toThrow('storage unavailable');
   expect((await env.db.prepare('SELECT count(*) AS n FROM account_deletion_object_queue WHERE user_id=1 AND object_key=?').bind(own).first()).n).toBe(1);
   expect(await env.kv.get(own)).toBe('private data');
-  expect(await processQueuedObject(env.db, {userId:1, storageType:'KV', key:own}, 'retry-cleaner', 102, remove)).toBe('deleted');
+  expect(await processQueuedObject(env.db, {userId:1, storageType:'KV', key:own}, 'retry-cleaner', 102, remove, target)).toBe('deleted');
   expect(await env.kv.get(own)).toBeNull();
 });
 

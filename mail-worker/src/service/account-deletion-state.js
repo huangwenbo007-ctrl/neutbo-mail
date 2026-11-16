@@ -131,20 +131,48 @@ export async function withAccountLocks(db, userIds, operation) {
 	return withObjectLocks(db, 'KV', ids.map(id => `internal/account/${id}`), crypto.randomUUID(), Math.floor(Date.now() / 1000), operation);
 }
 
+// Prototype only. Call while holding the object reservation, after a trusted
+// writer confirms the actual storage identity. Never infer an origin from the
+// current setting or from a client-supplied value. This is not wired to writers.
+export async function recordConfirmedObjectOrigin(db, key, storageType, storeId, owner) {
+	if (typeof key !== 'string' || !key.startsWith('attachments/') ||
+		!['KV', 'R2', 'S3'].includes(storageType) || typeof storeId !== 'string' || !storeId.trim() ||
+		typeof owner !== 'string' || !owner) {
+		throw new Error('Invalid confirmed object origin');
+	}
+	const row = await db.prepare(`INSERT INTO attachment_object_origin(object_key,storage_type,store_id,state)
+		SELECT ?,?,?,'known' WHERE EXISTS (SELECT 1 FROM attachment_object_lock WHERE object_key=? AND owner_token=? AND storage_type=?)
+		ON CONFLICT(object_key) DO UPDATE SET state=CASE
+			WHEN attachment_object_origin.state='known' AND attachment_object_origin.storage_type=excluded.storage_type
+			AND attachment_object_origin.store_id=excluded.store_id THEN 'known' ELSE 'ambiguous' END RETURNING state`)
+		.bind(key,storageType,storeId,key,owner,storageType).first();
+	if (!row) throw new Error('Object reservation required');
+	return row.state;
+}
+
 // Prototype only: do not connect this to a scheduler until *every* attachment
-// writer uses the same lock and each object's actual storage is known.
-export async function processQueuedObject(db, item, owner, now, deleteObject) {
+// writer uses the same lock and records the actual storage identity.
+export async function processQueuedObject(db, item, owner, now, deleteObject, verifiedTarget) {
 	const { userId, storageType, key } = item;
+	if (typeof key !== 'string' || !key.startsWith('attachments/') || typeof deleteObject !== 'function') {
+		throw new Error('Invalid attachment cleanup request');
+	}
 	if (!await acquireObjectLock(db, storageType, key, owner, now)) return 'busy';
 	try {
 		const queued = await db.prepare(`SELECT 1 AS present FROM account_deletion_object_queue
 			WHERE user_id = ? AND storage_type = ? AND object_key = ?`).bind(userId, storageType, key).first();
 		if (!queued) return 'not-queued';
 		const refs = await db.prepare('SELECT count(*) AS n FROM attachments WHERE key = ?').bind(key).first();
-		if (refs.n === 0) await deleteObject(storageType, key);
+		// Keep shared entries queued, so a later removal of the final reference
+		// can be retried even if it came from a different deletion path.
+		if (refs.n > 0) return 'shared';
+		const origin = await db.prepare('SELECT storage_type,store_id,state FROM attachment_object_origin WHERE object_key=?').bind(key).first();
+		if (!origin || origin.state !== 'known' || origin.storage_type !== storageType ||
+			!verifiedTarget || verifiedTarget.storageType !== storageType || verifiedTarget.storeId !== origin.store_id) return 'unresolved';
+		await deleteObject(storageType, key, origin.store_id);
 		await db.prepare('DELETE FROM account_deletion_object_queue WHERE user_id = ? AND storage_type = ? AND object_key = ?')
 			.bind(userId, storageType, key).run();
-		return refs.n ? 'shared' : 'deleted';
+		return 'deleted';
 	} finally {
 		await releaseObjectLock(db, storageType, key, owner);
 	}
