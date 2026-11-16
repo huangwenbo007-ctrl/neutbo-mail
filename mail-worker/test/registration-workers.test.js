@@ -136,6 +136,8 @@ it('does not stage an accidentally reactivated account for purge in D1', async (
   expect((await post('/register', {email:'other@example.com', password:'test-password', ...otherProof})).code).toBe(200);
   const user = await env.db.prepare("SELECT user_id FROM user WHERE email='purge@example.com'").first();
   const other = await env.db.prepare("SELECT user_id FROM user WHERE email='other@example.com'").first();
+  await env.db.prepare('UPDATE role SET user_id=? WHERE role_id=1').bind(user.user_id).run();
+  await env.db.prepare("INSERT INTO reg_key (code, count, role_id, user_id) VALUES ('PRESERVE-SHARED', 2, 1, ?)").bind(user.user_id).run();
   await env.db.prepare(`CREATE TABLE IF NOT EXISTS account_deletion_object_queue (
     storage_type TEXT NOT NULL, object_key TEXT NOT NULL, user_id INTEGER NOT NULL,
     PRIMARY KEY(user_id, storage_type, object_key))`).run();
@@ -146,12 +148,15 @@ it('does not stage an accidentally reactivated account for purge in D1', async (
   await stagePurge(env.db, user.user_id, 'KV');
   expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(user.user_id).first()).n).toBe(1);
   expect((await env.db.prepare('SELECT count(*) AS n FROM account WHERE user_id=?').bind(user.user_id).first()).n).toBe(1);
+  expect((await env.db.prepare('SELECT user_id FROM role WHERE role_id=1').first()).user_id).toBe(user.user_id);
   await env.db.prepare('UPDATE user SET is_del=1 WHERE user_id=?').bind(user.user_id).run();
   await stagePurge(env.db, user.user_id, 'KV');
   await stagePurge(env.db, user.user_id, 'KV');
   expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
   expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(other.user_id).first()).n).toBe(1);
   expect((await env.db.prepare('SELECT count(*) AS n FROM account WHERE user_id=?').bind(other.user_id).first()).n).toBe(1);
+  expect((await env.db.prepare('SELECT user_id FROM role WHERE role_id=1').first()).user_id).toBeNull();
+  expect(await env.db.prepare("SELECT user_id, count, role_id FROM reg_key WHERE code='PRESERVE-SHARED'").first()).toMatchObject({user_id:0, count:2, role_id:1});
 });
 
 it('rejects new mail for an account awaiting deletion', async () => {

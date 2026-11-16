@@ -19,6 +19,7 @@ Do not deploy this branch. The deletion endpoint and scheduler are deliberately 
 - A disconnected password-check prototype reserves at most five attempts per account per 15 minutes in D1, including successful attempts. It is not an authorization proof and is not connected to deletion or password changes. Test-only clock injection must never be exposed to clients.
 - A draft purge staging operation queues attachment keys and deletes only the selected user's metadata in one transaction. It never deletes the underlying objects.
 - Staging refuses to remove metadata when the user has been reactivated, even if a stale request says it is being purged. Isolated SQLite and Workers/D1 tests cover this, a harmless retry after staging, and preservation of another user's account.
+- Staging clears the deleted creator's references in shared roles and invitation codes while retaining those records. Isolated tests cover preservation and other users' references; operational and privacy review is still required.
 - Draft per-object reservations and queue processing have isolated SQLite tests for shared references, failed deletion, retry and lock contention. Incoming, outgoing, inline and on-site-copy draft paths use the reservation. Targeted Workers tests cover incoming/outgoing contention and stale on-site references; the scheduler remains disconnected and this does not yet protect actual attachments.
 
 ## Release blockers
@@ -37,7 +38,7 @@ Do not deploy this branch. The deletion endpoint and scheduler are deliberately 
 - Prevent every concurrent/in-flight writer from re-creating data after purge begins. Inbound and on-site delivery are only partly coordinated; audit all other account and attachment writes, older deployed versions, lock ordering, release failures, and SMTP behavior under contention before release.
 - Define how to stop, retry and observe KV/R2/S3 deletion, including partial failures and provider changes. Ensure a shared file is never removed while referenced by any other user.
 - Audit all other copies, including object storage, cached or forwarded messages, database backups and provider logs. Do not promise complete erasure or a fixed retention period until verified.
-- Review remaining user identifiers in `role.user_id`, `reg_key.user_id`, and session-generation/deletion tables. Roles or invitation codes may be shared with other users; don't blindly delete them or promise complete removal without a safe retention/anonymization design.
+- Review remaining user identifiers in session-generation/deletion tables and all other records. Verify shared role and invitation-code behavior and anonymization against existing deployment data; don't promise complete removal without a safe retention design.
 - Review compatibility with legacy admin deletion/restore operations, account aliases, disabled registration, existing sessions, and missing/deleted database rows.
 - Provide an explicit production migration and rollback plan. Without `account_session_generation`, the draft auth changes fail closed; adding code before the table would disrupt login.
 - Run Workers integration tests and realistic storage failure/concurrency tests; perform end-to-end tests only on isolated, disposable resources. Do not touch production before all checks and migration/rollback are ready.

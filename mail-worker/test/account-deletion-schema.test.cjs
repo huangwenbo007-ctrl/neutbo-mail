@@ -90,10 +90,13 @@ test('stages attachment keys and removes only the claimed user metadata', async 
   raw.exec(`CREATE TABLE user (user_id INTEGER PRIMARY KEY, is_del INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE star (user_id INTEGER); CREATE TABLE email (email_id INTEGER PRIMARY KEY, user_id INTEGER);
     CREATE TABLE account (user_id INTEGER); CREATE TABLE oauth (user_id INTEGER);
+    CREATE TABLE role (role_id INTEGER PRIMARY KEY, user_id INTEGER);
+    CREATE TABLE reg_key (rege_key_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE attachments (user_id INTEGER, key TEXT);
     INSERT INTO user (user_id) VALUES (1), (2); INSERT INTO attachments VALUES (1, 'shared'), (1, 'unique'), (2, 'shared');
     INSERT INTO email VALUES (11, 1), (22, 2); INSERT INTO account VALUES (1), (2);
     INSERT INTO inbound_attachment_failure VALUES (11, 'partial', 10), (22, 'other-partial', 10);
+    INSERT INTO role VALUES (10, 1), (20, 2); INSERT INTO reg_key VALUES (100, 1), (200, 2);
     INSERT INTO account_deletion_request VALUES (1, 0, 2592000, 'pending');`);
   const db = {
     prepare(sql) { return { bind(...args) { return {run() { return {meta:{changes:Number(raw.prepare(sql).run(...args).changes)}}; }}; } }; },
@@ -106,6 +109,8 @@ test('stages attachment keys and removes only the claimed user metadata', async 
   await stagePurge(db, 1, 'KV');
   assert.equal(raw.prepare('SELECT count(*) AS n FROM user WHERE user_id=1').get().n, 1);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM account_deletion_object_queue').get().n, 0);
+  assert.equal(raw.prepare('SELECT user_id FROM role WHERE role_id=10').get().user_id, 1);
+  assert.equal(raw.prepare('SELECT user_id FROM reg_key WHERE rege_key_id=100').get().user_id, 1);
   raw.exec('UPDATE user SET is_del = 1 WHERE user_id = 1');
   raw.exec("CREATE TRIGGER fail_purge BEFORE DELETE ON email BEGIN SELECT RAISE(ABORT, 'simulated failure'); END");
   await assert.rejects(stagePurge(db, 1, 'KV'));
@@ -120,6 +125,10 @@ test('stages attachment keys and removes only the claimed user metadata', async 
   assert.equal(raw.prepare('SELECT count(*) AS n FROM inbound_attachment_failure WHERE email_id=11').get().n, 0);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM inbound_attachment_failure WHERE email_id=22').get().n, 1);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM email WHERE user_id=2').get().n, 1);
+  assert.equal(raw.prepare('SELECT user_id FROM role WHERE role_id=10').get().user_id, null);
+  assert.equal(raw.prepare('SELECT user_id FROM role WHERE role_id=20').get().user_id, 2);
+  assert.equal(raw.prepare('SELECT user_id FROM reg_key WHERE rege_key_id=100').get().user_id, 0);
+  assert.equal(raw.prepare('SELECT user_id FROM reg_key WHERE rege_key_id=200').get().user_id, 2);
   await assert.rejects(stagePurge(db, 2, 'invalid'));
   raw.close();
 });

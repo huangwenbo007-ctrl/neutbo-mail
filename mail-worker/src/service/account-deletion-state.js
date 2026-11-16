@@ -64,6 +64,10 @@ export async function stagePurge(db, userId, storageType) {
 				.bind(userId, storageType, userId, userId, userId),
 			db.prepare(`DELETE FROM inbound_attachment_failure WHERE email_id IN
 				(SELECT email_id FROM email WHERE user_id = ?) AND ${stillPurging}`).bind(userId, userId, userId),
+			// These objects may be used by other users. Preserve them while
+			// removing their reference to the deleted creator.
+			db.prepare(`UPDATE role SET user_id = NULL WHERE user_id = ? AND ${stillPurging}`).bind(userId, userId, userId),
+			db.prepare(`UPDATE reg_key SET user_id = 0 WHERE user_id = ? AND ${stillPurging}`).bind(userId, userId, userId),
 			...['star', 'attachments', 'email', 'account', 'oauth', 'user'].map(table =>
 				db.prepare(`DELETE FROM ${table} WHERE user_id = ? AND ${stillPurging}`).bind(userId, userId, userId)),
 		]);
