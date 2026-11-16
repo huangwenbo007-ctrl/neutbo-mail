@@ -455,6 +455,34 @@ it('does not stage an accidentally reactivated account for purge in D1', async (
   expect(await env.db.prepare("SELECT user_id, count, role_id FROM reg_key WHERE code='PRESERVE-SHARED'").first()).toMatchObject({user_id:0, count:2, role_id:1});
 });
 
+it('keeps a shared attachment through another account’s full deletion lifecycle', async () => {
+  for (const name of ['lifecycle-owner','lifecycle-other']) {
+    const verified=await proof(`${name}@external.test`);
+    expect((await post('/register',{email:`${name}@example.com`,password:'test-password',...verified})).code).toBe(200);
+  }
+  const account = async name => env.db.prepare('SELECT u.user_id,a.account_id FROM user u JOIN account a ON a.user_id=u.user_id WHERE u.email=?').bind(`${name}@example.com`).first();
+  const owner=await account('lifecycle-owner'), other=await account('lifecycle-other');
+  const addMail = async person => env.db.prepare('INSERT INTO email(user_id,account_id,subject) VALUES(?,?,?) RETURNING email_id').bind(person.user_id,person.account_id,'lifecycle test').first();
+  const ownerMail=await addMail(owner), otherMail=await addMail(other);
+  const shared='attachments/lifecycle-shared', own='attachments/lifecycle-own';
+  const record=(person,mail,key,text)=>({key,userId:person.user_id,accountId:person.account_id,emailId:mail.email_id,filename:'test.txt',mimeType:'text/plain',content:new TextEncoder().encode(text)});
+  await attService.addAtt({env},[record(owner,ownerMail,shared,'shared'),record(owner,ownerMail,own,'private')]);
+  await attService.addAtt({env},[record(other,otherMail,shared,'shared')]);
+  const requested=1000000, due=requested+30*86400;
+  expect(await requestDeletion(env.db,owner.user_id,requested)).toBe(true);
+  expect(await claimDeletion(env.db,owner.user_id,due-1)).toBe(false);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(owner.user_id).first()).n).toBe(1);
+  expect(await claimDeletion(env.db,owner.user_id,due)).toBe(true);
+  await stagePurge(env.db,owner.user_id);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(owner.user_id).first()).n).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(other.user_id).first()).n).toBe(1);
+  expect(await processTestKvAttachment({env},{userId:owner.user_id,storageType:'KV',key:shared},'lifecycle-shared',due)).toBe('shared');
+  expect(await processTestKvAttachment({env},{userId:owner.user_id,storageType:'KV',key:own},'lifecycle-own',due)).toBe('deleted');
+  expect(await env.kv.get(shared)).toBe('shared');
+  expect(await env.kv.get(own)).toBeNull();
+  expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE key=? AND user_id=?').bind(shared,other.user_id).first()).n).toBe(1);
+});
+
 it('preserves shared attachments and retries failed cleanup in Workers bindings', async () => {
   await env.db.prepare(`CREATE TABLE IF NOT EXISTS account_deletion_object_queue (
     storage_type TEXT NOT NULL, object_key TEXT NOT NULL, user_id INTEGER NOT NULL,
