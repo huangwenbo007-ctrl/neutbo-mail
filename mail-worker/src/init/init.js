@@ -40,6 +40,26 @@ const dbInit = {
 		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS registration_email_rate (
 			ip_hash TEXT PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL
 		)`).run();
+		// Draft schema used by isolated tests. Existing deployments require an explicit migration.
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_session_generation (
+			user_id INTEGER PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0)
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_reauth_rate (
+			user_id INTEGER PRIMARY KEY, window_start INTEGER NOT NULL,
+			attempts INTEGER NOT NULL CHECK (attempts BETWEEN 1 AND 5)
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_deletion_request (
+			user_id INTEGER PRIMARY KEY, requested_at INTEGER NOT NULL, purge_after INTEGER NOT NULL,
+			state TEXT NOT NULL CHECK (state IN ('pending', 'purging')),
+			CHECK (purge_after >= requested_at + 2592000)
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS attachment_object_lock (
+			storage_type TEXT NOT NULL, object_key TEXT PRIMARY KEY, owner_token TEXT NOT NULL, created_at INTEGER NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS inbound_attachment_failure (
+			email_id INTEGER NOT NULL, object_key TEXT NOT NULL, recorded_at INTEGER NOT NULL,
+			PRIMARY KEY (email_id, object_key)
+		)`).run();
 		await settingService.refresh(c);
 		return c.text('success');
 	},

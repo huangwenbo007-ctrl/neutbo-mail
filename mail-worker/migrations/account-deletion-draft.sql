@@ -1,0 +1,52 @@
+-- Draft only: do not run against an existing environment until the service,
+-- recovery flow, purge worker and rollback procedure have all been reviewed.
+CREATE TABLE IF NOT EXISTS account_deletion_request (
+  user_id INTEGER PRIMARY KEY,
+  requested_at INTEGER NOT NULL,
+  purge_after INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'purging')),
+  CHECK (purge_after >= requested_at + 2592000)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_deletion_due
+  ON account_deletion_request(state, purge_after);
+
+-- Retain the generation after recovery so pre-deletion tokens stay invalid.
+CREATE TABLE IF NOT EXISTS account_session_generation (
+  user_id INTEGER PRIMARY KEY,
+  generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0)
+);
+
+-- Per-account reauthentication attempts; never store passwords here.
+CREATE TABLE IF NOT EXISTS account_reauth_rate (
+  user_id INTEGER PRIMARY KEY,
+  window_start INTEGER NOT NULL,
+  attempts INTEGER NOT NULL CHECK (attempts BETWEEN 1 AND 5)
+);
+
+-- This queue is only a schema sketch. Shared content-addressed objects require
+-- coordination with every upload/attachment writer before deletion is safe.
+CREATE TABLE IF NOT EXISTS account_deletion_object_queue (
+  storage_type TEXT NOT NULL,
+  object_key TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  PRIMARY KEY(user_id, storage_type, object_key)
+);
+
+-- Draft reservation: do not automatically expire a lock while a slow object
+-- write or delete may still be in flight. A failed owner needs manual recovery.
+CREATE TABLE IF NOT EXISTS attachment_object_lock (
+  storage_type TEXT NOT NULL,
+  object_key TEXT NOT NULL,
+  owner_token TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(object_key)
+);
+
+-- Failed inbound attachment keys remain traceable for later investigation.
+CREATE TABLE IF NOT EXISTS inbound_attachment_failure (
+  email_id INTEGER NOT NULL,
+  object_key TEXT NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  PRIMARY KEY(email_id, object_key)
+);

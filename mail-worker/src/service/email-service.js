@@ -26,6 +26,7 @@ import telegramService from './telegram-service';
 import webhookService from './webhook-service';
 import forwardMime from '../utils/forward-mime';
 import verifyUtils from '../utils/verify-utils';
+import { withAccountLock } from './account-deletion-state';
 
 const emailService = {
 
@@ -955,6 +956,15 @@ const emailService = {
 
 			//如果收件人存在就把邮件信息改成收件人的
 			if (accountRow) {
+				const activeRecipient = await userService.selectById(c, accountRow.userId);
+				if (!activeRecipient) {
+					emailValues.userId = accountRow.userId;
+					emailValues.accountId = accountRow.accountId;
+					emailValues.status = emailConst.status.BOUNCED;
+					emailValues.message = `The recipient <${email}> is unavailable.`;
+					emailDataList.push(emailValues);
+					continue;
+				}
 
 				//设置给收件人保存
 				emailValues.userId = accountRow.userId;
@@ -1005,22 +1015,37 @@ const emailService = {
 		const receiveEmailList = emailDataList.filter(emailRow => emailRow.status === emailConst.status.RECEIVE || emailRow.status === emailConst.status.NOONE);
 		const emailRowList = [];
 
-		for (const emailData of receiveEmailList) {
-
-			const emailRow = await orm(c).insert(email).values(emailData).returning().get();
-			emailRowList.push(emailRow);
-
-			//设置附件保存
-			for (const attRow of attList) {
-				const attValues = {...attRow};
-				attValues.emailId = emailRow.emailId;
-				attValues.accountId = emailRow.accountId;
-				attValues.userId = emailRow.userId;
-				attValues.attId = null;
-				await orm(c).insert(att).values(attValues).run();
+		await attService.withAttachmentLocks(c, attList.map(item => item.key), async () => {
+			// The sender's message may have been removed while this delivery waited
+			// for a lock. Never create references to an object already eligible for purge.
+			for (const item of attList) {
+				const source = await c.env.db.prepare('SELECT 1 AS found FROM attachments WHERE att_id = ? AND key = ?')
+					.bind(item.attId, item.key).first();
+				if (!source) throw new BizError('附件已不可用，请重新发送邮件');
 			}
-
-		}
+			for (const emailData of receiveEmailList) {
+				const deliver = async () => {
+					if (emailData.userId && !await userService.selectById(c, emailData.userId)) {
+						emailData.status = emailConst.status.BOUNCED;
+						emailData.message = `The recipient <${emailData.toEmail}> is unavailable.`;
+						return;
+					}
+					const emailRow = await orm(c).insert(email).values(emailData).returning().get();
+					emailRowList.push(emailRow);
+					//设置附件保存
+					for (const attRow of attList) {
+						const attValues = {...attRow};
+						attValues.emailId = emailRow.emailId;
+						attValues.accountId = emailRow.accountId;
+						attValues.userId = emailRow.userId;
+						attValues.attId = null;
+						await orm(c).insert(att).values(attValues).run();
+					}
+				};
+				if (emailData.userId) await withAccountLock(c.env.db, emailData.userId, deliver);
+				else await deliver();
+			}
+		});
 
 		const bouncedEmail = emailDataList.find(emailRow => emailRow.status === emailConst.status.BOUNCED);
 

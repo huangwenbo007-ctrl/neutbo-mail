@@ -12,6 +12,7 @@ import userService from '../service/user-service';
 import telegramService from '../service/telegram-service';
 import aiService from '../service/ai-service';
 import webhookService from '../service/webhook-service';
+import { withAccountLock } from '../service/account-deletion-state';
 
 export async function email(message, env, ctx) {
 
@@ -80,6 +81,10 @@ export async function email(message, env, ctx) {
 
 		if (account) {
 			 userRow = await userService.selectByIdIncludeDel({ env: env }, account.userId);
+			 if (!userRow || userRow.isDel === isDel.DELETE) {
+				 message.setReject('Recipient account is unavailable');
+				 return;
+			 }
 		}
 
 		if (account && userRow.email !== env.admin) {
@@ -142,23 +147,56 @@ export async function email(message, env, ctx) {
 			}
 		}
 
-		let emailRow = await emailService.receive({ env }, params, cidAttachments, r2Domain);
-
-		attachments.forEach(attachment => {
-			attachment.emailId = emailRow.emailId;
-			attachment.userId = emailRow.userId;
-			attachment.accountId = emailRow.accountId;
-		});
-
-		try {
-			if (attachments.length > 0) {
-				await attService.addAtt({ env }, attachments);
+		const saveMessage = async () => {
+			if (account) {
+				const currentUser = await userService.selectByIdIncludeDel({ env }, account.userId);
+				const currentAccount = await accountService.selectById({ env }, account.accountId);
+				if (!currentUser || currentUser.isDel === isDel.DELETE || !currentAccount || currentAccount.userId !== account.userId) {
+					message.setReject('Recipient account is unavailable');
+					return null;
+				}
 			}
-		} catch (e) {
-			console.error(e);
-		}
+			let emailRow = await emailService.receive({ env }, params, cidAttachments, r2Domain);
 
-		emailRow = await emailService.completeReceive({ env }, account ? emailConst.status.RECEIVE : emailConst.status.NOONE, emailRow.emailId);
+			attachments.forEach(attachment => {
+				attachment.emailId = emailRow.emailId;
+				attachment.userId = emailRow.userId;
+				attachment.accountId = emailRow.accountId;
+			});
+
+			try {
+				if (attachments.length > 0) {
+					await attService.addAtt({ env }, attachments);
+				}
+			} catch (e) {
+				// Reject the delivery rather than reporting success with missing attachments.
+				// Keep the failed message and attempted object keys for investigation; do
+				// not delete objects here because another message may reference them.
+				try {
+					const now = Math.floor(Date.now() / 1000);
+					await env.db.batch([
+						env.db.prepare('UPDATE email SET status = ?, is_del = ? WHERE email_id = ?')
+							.bind(emailConst.status.FAILED, isDel.DELETE, emailRow.emailId),
+						...[...new Set(attachments.map(item => item.key))].map(key => env.db.prepare(
+							'INSERT OR IGNORE INTO inbound_attachment_failure (email_id, object_key, recorded_at) VALUES (?, ?, ?)'
+						).bind(emailRow.emailId, key, now)),
+					]);
+				} catch (recordError) {
+					console.error('Failed to record inbound attachment error');
+				}
+				message.setReject('Unable to save attachment; please resend');
+				return null;
+			}
+
+			emailRow = await emailService.completeReceive({ env }, account ? emailConst.status.RECEIVE : emailConst.status.NOONE, emailRow.emailId);
+			return emailRow;
+		};
+		// The same lock is used by the deletion prototype. Do not send or forward
+		// messages while holding it; only coordinate the account's own writes.
+		const emailRow = account
+			? await withAccountLock(env.db, account.userId, saveMessage)
+			: await saveMessage();
+		if (!emailRow) return;
 
 
 		if (ruleType === settingConst.ruleType.RULE) {

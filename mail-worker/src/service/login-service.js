@@ -20,6 +20,7 @@ import { toUtc } from '../utils/date-uitil';
 import { t } from '../i18n/i18n.js';
 import verifyRecordService from './verify-record-service';
 import registrationEmailService from './registration-email-service';
+import { readActiveSessionGeneration } from './account-deletion-state';
 
 const loginService = {
 
@@ -278,8 +279,10 @@ const loginService = {
 			throw new BizError(t('IncorrectPwd'));
 		}
 
+		const generation = await readActiveSessionGeneration(c.env.db, userRow.userId);
+		if (generation === null) throw new BizError(t('authExpired'), 401);
 		const uuid = uuidv4();
-		const jwt = await JwtUtils.generateToken(c,{ userId: userRow.userId, token: uuid });
+		const jwt = await JwtUtils.generateToken(c,{ userId: userRow.userId, token: uuid, generation });
 
 		let authInfo = await c.env.kv.get(KvConst.AUTH_INFO + userRow.userId, { type: 'json' });
 

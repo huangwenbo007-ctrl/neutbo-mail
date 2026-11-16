@@ -7,6 +7,7 @@ import userService from '../service/user-service';
 import permService from '../service/perm-service';
 import { t } from '../i18n/i18n'
 import app from '../hono/hono';
+import { readActiveSessionGeneration } from '../service/account-deletion-state';
 
 const exclude = [
 	'/login',
@@ -121,6 +122,10 @@ app.use('*', async (c, next) => {
 	}
 
 	const { userId, token } = result;
+	const generation = await readActiveSessionGeneration(c.env.db, userId);
+	if (generation === null || generation !== (result.generation ?? 0)) {
+		throw new BizError(t('authExpired'), 401);
+	}
 	const authInfo = await c.env.kv.get(KvConst.AUTH_INFO + userId, { type: 'json' });
 
 	if (!authInfo) {

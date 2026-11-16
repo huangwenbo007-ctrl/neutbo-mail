@@ -20,6 +20,7 @@ import {oauth} from "../entity/oauth";
 import oauthService from "./oauth-service";
 import settingService from './setting-service';
 import starService from './star-service';
+import { restoreDeletion, withAccountLocks } from './account-deletion-state';
 
 const userService = {
 
@@ -97,23 +98,24 @@ const userService = {
 	},
 
 	async delete(c, userId) {
-		const { syncDelete } = await settingService.query(c);
-		if (syncDelete === settingConst.syncDelete.OPEN) {
-			await this.physicsDelete(c, { userIds: String(userId) });
-			await c.env.kv.delete(kvConst.AUTH_INFO + userId)
-			return;
-		}
-		await orm(c).update(user).set({ isDel: isDel.DELETE }).where(eq(user.userId, userId)).run();
-		await c.env.kv.delete(kvConst.AUTH_INFO + userId)
+		// The old path could permanently delete immediately. Keep it closed until
+		// recent reauthentication and the recovery-period flow are implemented.
+		throw new BizError('账号删除功能暂不可用，请联系 support@neutbo.com');
 	},
 
 	async physicsDelete(c, params) {
 		let { userIds } = params;
 		userIds = userIds.split(',').map(Number);
-		await starService.removeByUserIds(c, userIds);
-		await accountService.physicsDeleteByUserIds(c, userIds);
-		await oauthService.deleteByUserIds(c, userIds);
-		await orm(c).delete(user).where(inArray(user.userId, userIds)).run();
+		await withAccountLocks(c.env.db, userIds, async () => {
+			for (const userId of new Set(userIds)) {
+				const request = await c.env.db.prepare('SELECT 1 AS present FROM account_deletion_request WHERE user_id = ?').bind(userId).first();
+				if (request) throw new BizError('账号正在等待恢复或清理，无法通过此入口删除');
+			}
+			await starService.removeByUserIds(c, userIds);
+			await accountService.physicsDeleteByUserIds(c, userIds);
+			await oauthService.deleteByUserIds(c, userIds);
+			await orm(c).delete(user).where(inArray(user.userId, userIds)).run();
+		});
 	},
 
 	async list(c, params) {
@@ -380,11 +382,19 @@ const userService = {
 
 	async restore(c, params) {
 		const { userId, type } = params
-		await orm(c)
+		const deletion = await c.env.db.prepare('SELECT state FROM account_deletion_request WHERE user_id = ?').bind(userId).first();
+		if (deletion) {
+			const restored = await restoreDeletion(c.env.db, userId, Math.floor(Date.now() / 1000));
+			if (!restored) throw new BizError('恢复期已结束或账号正在清理，无法恢复');
+			await c.env.kv.delete(KvConst.AUTH_INFO + userId);
+			return;
+		}
+		const legacyRestored = await orm(c)
 			.update(user)
 			.set({ isDel: isDel.NORMAL })
-			.where(eq(user.userId, userId))
-			.run();
+			.where(and(eq(user.userId, userId), sql`NOT EXISTS (SELECT 1 FROM account_deletion_request WHERE user_id = ${userId})`))
+			.returning({userId: user.userId});
+		if (!legacyRestored.length) throw new BizError('账号状态已更改，请重试');
 		const userRow = await this.selectById(c, userId);
 		await accountService.restoreByEmail(c, userRow.email);
 
