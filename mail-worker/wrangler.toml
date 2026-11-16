@@ -64,12 +64,13 @@ domain = ["neutbo.com"]
 admin = "test-admin@neutbo.com"
 orm_log = false
 analysis_cache = false
+account_deletion_test_only = "enabled"
 
 [[previews.d1_databases]]
 binding = "db"
-database_name = "neutbo-mail-verification-test"
-database_id = "2eebad0f-ffe7-4347-b55e-c9f74b7aad2c"
+database_name = "neutbo-mail-deletion-test"
+database_id = "a34fb478-041b-4e97-9009-6806cf10adc9"
 
 [[previews.kv_namespaces]]
 binding = "kv"
-id = "f72aeaa4a60847c984160f99de6c4e1e"
+id = "ff4ce2a4c9e54acaba715c2932060672"
