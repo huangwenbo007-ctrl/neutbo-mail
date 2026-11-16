@@ -2,7 +2,7 @@ import { SELF, env, fetchMock } from 'cloudflare:test';
 import { beforeEach, afterEach, expect, it } from 'vitest';
 import settingService from '../src/service/setting-service';
 import { sign } from 'hono/jwt';
-import { requestDeletion as requestDeletionRaw, restoreDeletion, claimDeletion, stagePurge } from '../src/service/account-deletion-state';
+import { requestDeletion as requestDeletionRaw, restoreDeletion, claimDeletion, stagePurge, processQueuedObject } from '../src/service/account-deletion-state';
 import jwtUtils from '../src/utils/jwt-utils';
 import userService from '../src/service/user-service';
 import { email as receiveEmail } from '../src/email/email';
@@ -227,6 +227,27 @@ it('does not stage an accidentally reactivated account for purge in D1', async (
   expect((await env.db.prepare('SELECT count(*) AS n FROM account WHERE user_id=?').bind(other.user_id).first()).n).toBe(1);
   expect((await env.db.prepare('SELECT user_id FROM role WHERE role_id=1').first()).user_id).toBeNull();
   expect(await env.db.prepare("SELECT user_id, count, role_id FROM reg_key WHERE code='PRESERVE-SHARED'").first()).toMatchObject({user_id:0, count:2, role_id:1});
+});
+
+it('preserves shared attachments and retries failed cleanup in Workers bindings', async () => {
+  await env.db.prepare(`CREATE TABLE IF NOT EXISTS account_deletion_object_queue (
+    storage_type TEXT NOT NULL, object_key TEXT NOT NULL, user_id INTEGER NOT NULL,
+    PRIMARY KEY(user_id, storage_type, object_key))`).run();
+  const shared = 'attachments/test-shared-object';
+  const own = 'attachments/test-private-object';
+  await env.db.prepare('INSERT INTO attachments (user_id, email_id, account_id, key) VALUES (2, 2, 2, ?)').bind(shared).run();
+  await env.db.prepare("INSERT INTO account_deletion_object_queue VALUES ('KV', ?, 1), ('KV', ?, 1)").bind(shared, own).run();
+  await env.kv.put(shared, 'shared data');
+  await env.kv.put(own, 'private data');
+  const remove = async (_type, key) => env.kv.delete(key);
+  expect(await processQueuedObject(env.db, {userId:1, storageType:'KV', key:shared}, 'shared-cleaner', 100, remove)).toBe('shared');
+  expect(await env.kv.get(shared)).toBe('shared data');
+  await expect(processQueuedObject(env.db, {userId:1, storageType:'KV', key:own}, 'failing-cleaner', 101,
+    async () => {throw new Error('storage unavailable');})).rejects.toThrow('storage unavailable');
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_deletion_object_queue WHERE user_id=1 AND object_key=?').bind(own).first()).n).toBe(1);
+  expect(await env.kv.get(own)).toBe('private data');
+  expect(await processQueuedObject(env.db, {userId:1, storageType:'KV', key:own}, 'retry-cleaner', 102, remove)).toBe('deleted');
+  expect(await env.kv.get(own)).toBeNull();
 });
 
 it('rejects new mail for an account awaiting deletion', async () => {

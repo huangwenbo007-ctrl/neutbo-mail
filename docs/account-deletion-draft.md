@@ -25,6 +25,7 @@ Do not deploy this branch. The deletion endpoint and scheduler are deliberately 
 - Staging refuses to remove metadata when the user has been reactivated, even if a stale request says it is being purged. Isolated SQLite and Workers/D1 tests cover this, a harmless retry after staging, and preservation of another user's account.
 - Staging clears the deleted creator's references in shared roles and invitation codes while retaining those records. Isolated tests cover preservation and other users' references; operational and privacy review is still required.
 - Draft per-object reservations and queue processing have isolated SQLite tests for shared references, failed deletion, retry and lock contention. Incoming, outgoing, inline and on-site-copy draft paths use the reservation. Targeted Workers tests cover incoming/outgoing contention and stale on-site references; the scheduler remains disconnected and this does not yet protect actual attachments.
+- Workers binding tests also exercise shared-file preservation and failure/retry with D1 and KV. The Cloudflare preview build succeeds with test D1/KV, but its deployed version currently has no JWT secret; it is not a complete end-to-end test environment.
 
 ## Release blockers
 
