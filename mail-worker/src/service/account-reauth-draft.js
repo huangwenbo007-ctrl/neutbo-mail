@@ -3,6 +3,18 @@
 import cryptoUtils from '../utils/crypto-utils';
 import { withAccountLock } from './account-deletion-state';
 
+async function verifyPassword(password, salt, storedHash) {
+	const candidateHash = await cryptoUtils.genHashPassword(password, salt);
+	const encoder = new TextEncoder();
+	// Hash both strings to fixed-size buffers before the Workers constant-time
+	// comparison. This preserves compatibility with existing password hashes.
+	const [candidate, expected] = await Promise.all([
+		crypto.subtle.digest('SHA-256', encoder.encode(candidateHash)),
+		crypto.subtle.digest('SHA-256', encoder.encode(storedHash)),
+	]);
+	return crypto.subtle.timingSafeEqual(candidate, expected);
+}
+
 async function passwordSnapshot(db, userId, password, now) {
 	if (!Number.isSafeInteger(userId) || userId <= 0 || !Number.isSafeInteger(now) || now < 0 ||
 		typeof password !== 'string' || password.length < 1 || password.length > 128) return null;
@@ -18,7 +30,7 @@ async function passwordSnapshot(db, userId, password, now) {
 	const user = await db.prepare('SELECT salt, password FROM user WHERE user_id = ? AND is_del = 0 AND status = 0')
 		.bind(userId).first();
 	if (!user || typeof user.salt !== 'string' || typeof user.password !== 'string') return null;
-	return await cryptoUtils.verifyPassword(password, user.salt, user.password) ? user : null;
+	return await verifyPassword(password, user.salt, user.password) ? user : null;
 }
 
 export async function checkPasswordReauth(db, userId, password, now) {
