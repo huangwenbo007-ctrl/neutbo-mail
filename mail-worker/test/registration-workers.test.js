@@ -9,6 +9,7 @@ import { email as receiveEmail } from '../src/email/email';
 import attService from '../src/service/att-service';
 import emailService from '../src/service/email-service';
 import fileUtils from '../src/utils/file-utils';
+import app from '../src/hono/webs';
 import { checkPasswordReauth, requestPasswordDeletion } from '../src/service/account-reauth-draft';
 import { acquireObjectLock, releaseObjectLock } from '../src/service/account-deletion-state';
 
@@ -106,6 +107,35 @@ it('requests password deletion only with the correct password and protects the a
   expect(await env.db.prepare('SELECT requested_at,purge_after,state FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first())
     .toMatchObject({requested_at:now, purge_after:now + 2592000, state:'pending'});
   expect((await env.db.prepare('SELECT generation FROM account_session_generation WHERE user_id=?').bind(user.user_id).first()).generation).toBe(1);
+});
+
+it('accepts a confirmed password deletion request only from the authenticated owner', async () => {
+  const verified = await proof('api-delete-owner@external.test');
+  expect((await post('/register', {email:'api-delete@example.com', password:'test-password', ...verified})).code).toBe(200);
+  const user = await env.db.prepare("SELECT user_id FROM user WHERE email='api-delete@example.com'").first();
+  await env.db.prepare('INSERT OR IGNORE INTO role_perm (role_id, perm_id) VALUES (1, 5)').run();
+  const login = await post('/login', {email:'api-delete@example.com', password:'test-password'});
+  expect(login.code).toBe(200);
+  const send = async (token, payload) => (await SELF.fetch('https://local.test/api/my/delete/request', {
+    method:'POST', headers:{Authorization:token || '', 'Content-Type':'application/json', 'CF-Connecting-IP':'192.0.2.20'},
+    body:JSON.stringify(payload),
+  })).json();
+  const disabledResponse = await app.fetch(new Request('https://local.test/my/delete/request', {
+    method:'POST', headers:{Authorization:login.data.token, 'Content-Type':'application/json'},
+    body:JSON.stringify({confirmation:'DELETE', password:'test-password'}),
+  }), {...env, account_deletion_test_only:'disabled'});
+  expect((await disabledResponse.json()).code).not.toBe(200);
+  expect((await send('', {confirmation:'DELETE', password:'test-password'})).code).not.toBe(200);
+  expect((await send(login.data.token, {password:'test-password'})).code).not.toBe(200);
+  expect((await send(login.data.token, {confirmation:'DELETE', password:'incorrect'})).code).not.toBe(200);
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(0);
+  const result = await send(login.data.token, {confirmation:'DELETE', password:'test-password'});
+  expect(result.code).toBe(200);
+  const request = await env.db.prepare('SELECT state,purge_after,requested_at FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first();
+  expect(request.state).toBe('pending');
+  expect(request.purge_after - request.requested_at).toBe(2592000);
+  expect(result.data.recoverUntil).toBe(request.purge_after);
+  expect((await send(login.data.token, {confirmation:'DELETE', password:'test-password'})).code).not.toBe(200);
 });
 
 it('rejects a deletion if the password changed after verification', async () => {

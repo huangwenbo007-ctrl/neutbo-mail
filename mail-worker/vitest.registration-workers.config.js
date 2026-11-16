@@ -16,6 +16,7 @@ export default defineWorkersConfig({
             admin: 'admin@example.com',
             jwt_secret: 'local-integration-tests-only',
             orm_log: false,
+            account_deletion_test_only: 'enabled',
           },
         },
       },
