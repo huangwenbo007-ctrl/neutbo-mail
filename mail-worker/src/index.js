@@ -7,6 +7,7 @@ import r2Service from './service/r2-service';
 import oauthService from './service/oauth-service';
 import analysisService from './service/analysis-service';
 import registrationEmailService from './service/registration-email-service';
+import { hasAttachmentReference } from './service/attachment-access';
 export default {
 	 async fetch(req, env, ctx) {
 
@@ -20,12 +21,19 @@ export default {
 
 		if (url.pathname.startsWith('/oss/')) {
 			const key = url.pathname.slice('/oss/'.length);
+			if (key.startsWith('attachments/') && !await hasAttachmentReference(env, key)) {
+				return new Response('Not Found', { status: 404 });
+			}
 			const resp = await r2Service.toObjResp({ env }, key);
 			return resp || new Response('Not Found', { status: 404 });
 		}
 
 		 if (['/static/','/attachments/'].some(p => url.pathname.startsWith(p))) {
-			 const resp = await r2Service.toObjResp({ env }, url.pathname.substring(1));
+			 const key = url.pathname.substring(1);
+			 if (key.startsWith('attachments/') && !await hasAttachmentReference(env, key)) {
+				 return new Response('Not Found', { status: 404 });
+			 }
+			 const resp = await r2Service.toObjResp({ env }, key);
 			 return resp || new Response('Not Found', { status: 404 });
 		 }
 

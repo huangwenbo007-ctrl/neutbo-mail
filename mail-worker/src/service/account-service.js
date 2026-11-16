@@ -12,6 +12,7 @@ import turnstileService from './turnstile-service';
 import roleService from './role-service';
 import { t } from '../i18n/i18n';
 import verifyRecordService from './verify-record-service';
+import { withAccountLock } from './account-deletion-state';
 
 const accountService = {
 
@@ -256,8 +257,14 @@ const accountService = {
 
 	async physicsDelete(c, params) {
 		const { accountId } = params
-		await emailService.physicsDeleteByAccountId(c, accountId)
-		await orm(c).delete(account).where(eq(account.accountId, accountId)).run();
+		const owner = await c.env.db.prepare('SELECT user_id FROM account WHERE account_id=?').bind(accountId).first();
+		if (!owner) return;
+		return withAccountLock(c.env.db, owner.user_id, async () => {
+			const request = await c.env.db.prepare('SELECT 1 AS present FROM account_deletion_request WHERE user_id=?').bind(owner.user_id).first();
+			if (request) throw new BizError('账号正在等待恢复或清理，无法通过此入口删除邮箱');
+			await emailService.physicsDeleteByAccountId(c, accountId);
+			await orm(c).delete(account).where(eq(account.accountId, accountId)).run();
+		});
 	},
 
 	async setAllReceive(c, params, userId) {

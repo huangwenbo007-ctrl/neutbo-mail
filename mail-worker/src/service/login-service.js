@@ -20,7 +20,6 @@ import { toUtc } from '../utils/date-uitil';
 import { t } from '../i18n/i18n.js';
 import verifyRecordService from './verify-record-service';
 import registrationEmailService from './registration-email-service';
-import { readActiveSessionGeneration } from './account-deletion-state';
 
 const loginService = {
 
@@ -275,12 +274,19 @@ const loginService = {
 			throw new BizError(t('isBanUser'));
 		}
 
-		if (!await cryptoUtils.verifyPassword(password, userRow.salt, userRow.password) && !noVerifyPwd) {
+		// Read the credential and session generation in one D1 snapshot. A
+		// password reset after this query increments the generation, making any
+		// token issued from this snapshot unusable even if login finishes later.
+		const authSnapshot = await c.env.db.prepare(`SELECT u.password, u.salt, COALESCE(g.generation, 0) AS generation
+			FROM user u LEFT JOIN account_session_generation g ON g.user_id = u.user_id
+			WHERE u.user_id = ? AND u.email COLLATE NOCASE = ? AND u.is_del = 0 AND u.status = 0`)
+			.bind(userRow.userId, email).first();
+		if (!authSnapshot) throw new BizError(t('authExpired'), 401);
+		if (!noVerifyPwd && !await cryptoUtils.verifyPassword(password, authSnapshot.salt, authSnapshot.password)) {
 			throw new BizError(t('IncorrectPwd'));
 		}
 
-		const generation = await readActiveSessionGeneration(c.env.db, userRow.userId);
-		if (generation === null) throw new BizError(t('authExpired'), 401);
+		const generation = authSnapshot.generation;
 		const uuid = uuidv4();
 		const jwt = await JwtUtils.generateToken(c,{ userId: userRow.userId, token: uuid, generation });
 

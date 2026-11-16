@@ -1,10 +1,11 @@
 import { SELF, env, fetchMock } from 'cloudflare:test';
-import { beforeEach, afterEach, expect, it } from 'vitest';
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import settingService from '../src/service/setting-service';
 import { sign } from 'hono/jwt';
 import { requestDeletion as requestDeletionRaw, restoreDeletion, claimDeletion, stagePurge, processQueuedObject, recordConfirmedObjectOrigin } from '../src/service/account-deletion-state';
 import jwtUtils from '../src/utils/jwt-utils';
 import userService from '../src/service/user-service';
+import accountService from '../src/service/account-service';
 import { email as receiveEmail } from '../src/email/email';
 import attService from '../src/service/att-service';
 import emailService from '../src/service/email-service';
@@ -15,6 +16,7 @@ import { verifyGoogleReauthToken } from '../src/service/google-reauth-draft';
 import { commitGoogleDeletion } from '../src/service/google-deletion-draft';
 import { acquireObjectLock, releaseObjectLock } from '../src/service/account-deletion-state';
 import { processTestKvAttachment } from '../src/service/attachment-cleanup-draft';
+import cryptoUtils from '../src/utils/crypto-utils';
 
 const requestDeletion = (db, userId, now) => requestDeletionRaw(db, userId, now, 'admin@example.com');
 
@@ -223,6 +225,31 @@ it('requires the current password and invalidates old sessions after password ch
   expect((await post('/login', {email:'password-change@example.com', password:'replacement-password'})).code).toBe(200);
 });
 
+it.each(['administrator', 'owner'])('rejects an old-password session overlapping a password change by %s', async mode => {
+  const email=`login-reset-${mode}@example.com`;
+  const verified = await proof(`login-reset-${mode}@external.test`);
+  expect((await post('/register', {email, password:'old-password', ...verified})).code).toBe(200);
+  const user = await env.db.prepare('SELECT user_id FROM user WHERE email=?').bind(email).first();
+  const original = cryptoUtils.verifyPassword.bind(cryptoUtils);
+  const spy = vi.spyOn(cryptoUtils, 'verifyPassword').mockImplementationOnce(async (...args) => {
+    const matches = await original(...args);
+    if (mode === 'administrator') await userService.resetPassword({env}, {password:'new-password'}, user.user_id);
+    else expect(await changePasswordWithReauth(env.db,user.user_id,'old-password','new-password',Math.floor(Date.now()/1000))).toBe(true);
+    return matches;
+  });
+  try {
+    const raced = await post('/login', {email, password:'old-password'});
+    if (raced.code === 200) {
+      const response = await SELF.fetch('https://local.test/api/my/loginUserInfo', {headers:{Authorization:raced.data.token}});
+      expect((await response.json()).code).not.toBe(200);
+    }
+    expect((await post('/login', {email, password:'old-password'})).code).not.toBe(200);
+    expect((await post('/login', {email, password:'new-password'})).code).toBe(200);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 it('does not overwrite a password changed concurrently after verification', async () => {
   const verified = await proof('password-race-owner@external.test');
   expect((await post('/register', {email:'password-race@example.com', password:'test-password', ...verified})).code).toBe(200);
@@ -318,6 +345,36 @@ it('rejects a deletion if the password changed after verification', async () => 
   expect(await requestPasswordDeletion(db, user.user_id, 'test-password', Math.floor(Date.now()/1000), 'admin@example.com')).toBe(false);
   expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(0);
   expect((await env.db.prepare('SELECT count(*) AS n FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+});
+
+it('preserves pending-account mail against scheduled and privileged deletion paths', async () => {
+  for (const name of ['pending-retention','active-retention']) {
+    const verified=await proof(`${name}@external.test`);
+    expect((await post('/register',{email:`${name}@example.com`,password:'test-password',...verified})).code).toBe(200);
+  }
+  const pending=await env.db.prepare("SELECT u.user_id,a.account_id FROM user u JOIN account a ON a.user_id=u.user_id WHERE u.email='pending-retention@example.com'").first();
+  const active=await env.db.prepare("SELECT u.user_id,a.account_id FROM user u JOIN account a ON a.user_id=u.user_id WHERE u.email='active-retention@example.com'").first();
+  const p=await env.db.prepare("INSERT INTO email(user_id,account_id,subject,create_time) VALUES (?,?,'pending-protected','2000-01-01 00:00:00') RETURNING email_id").bind(pending.user_id,pending.account_id).first();
+  const a=await env.db.prepare("INSERT INTO email(user_id,account_id,subject,create_time) VALUES (?,?,'active-removable','2000-01-01 00:00:00') RETURNING email_id").bind(active.user_id,active.account_id).first();
+  await env.db.prepare("INSERT INTO attachments(user_id,account_id,email_id,key) VALUES (?,?,?,'attachments/protected')").bind(pending.user_id,pending.account_id,p.email_id).run();
+  expect(await requestDeletion(env.db,pending.user_id,Math.floor(Date.now()/1000))).toBe(true);
+  await env.db.prepare('UPDATE setting SET auto_clean_days=1').run();
+  await refresh();
+  await emailService.autoClean({env});
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE email_id=?').bind(p.email_id).first()).n).toBe(1);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE email_id=?').bind(a.email_id).first()).n).toBe(0);
+  await expect(emailService.physicsDelete({env},{emailIds:String(p.email_id)})).rejects.toThrow('等待恢复或清理');
+  await expect(emailService.batchDelete({env},{subject:'pending-protected',type:'include'})).rejects.toThrow('等待恢复或清理');
+  await expect(accountService.physicsDelete({env},{accountId:pending.account_id})).rejects.toThrow('等待恢复或清理');
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE email_id=?').bind(p.email_id).first()).n).toBe(1);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE email_id=?').bind(p.email_id).first()).n).toBe(1);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account WHERE account_id=?').bind(pending.account_id).first()).n).toBe(1);
+});
+
+it('removes more than one D1 parameter batch of matching mail', async () => {
+  await env.db.batch(Array.from({length: 110}, () => env.db.prepare("INSERT INTO email(user_id,account_id,subject) VALUES (1,1,'bulk-limit-test')")));
+  await emailService.batchDelete({env},{subject:'bulk-limit-test',type:'include'});
+  expect((await env.db.prepare("SELECT count(*) AS n FROM email WHERE subject='bulk-limit-test'").first()).n).toBe(0);
 });
 
 it('rejects a pre-deletion session after deletion and after recovery', async () => {
@@ -442,6 +499,23 @@ it('queues removed attachments without deleting objects shared with another mail
   await expect(processQueuedObject(env.db, {userId:0,storageType:'UNRESOLVED',key:own}, 'cleaner', 123, async () => {})).rejects.toThrow('Invalid object reservation');
   await attService.removeByEmailIds({env}, [10]);
   expect((await env.db.prepare("SELECT count(*) AS n FROM account_deletion_object_queue WHERE user_id=0 AND storage_type='UNRESOLVED'").first()).n).toBe(2);
+});
+
+it('stops serving a retained attachment after its last reference is removed', async () => {
+  const key='attachments/known-deleted-object.txt';
+  await env.kv.put(key,'private test attachment');
+  await env.db.prepare('INSERT INTO attachments (user_id,email_id,account_id,key) VALUES (1,10,1,?),(2,20,2,?)').bind(key,key).run();
+  const get=path=>SELF.fetch('https://local.test/'+path);
+  expect((await get(key)).status).toBe(200);
+  expect((await get('oss/'+key)).status).toBe(200);
+  expect((await get('api/oss/'+key)).status).toBe(200);
+  await attService.removeByEmailIds({env},[10]);
+  expect((await get(key)).status).toBe(200);
+  await attService.removeByEmailIds({env},[20]);
+  expect(await env.kv.get(key)).toBe('private test attachment');
+  expect((await get(key)).status).toBe(404);
+  expect((await get('oss/'+key)).status).toBe(404);
+  expect((await get('api/oss/'+key)).status).toBe(404);
 });
 
 it('rejects new mail for an account awaiting deletion', async () => {

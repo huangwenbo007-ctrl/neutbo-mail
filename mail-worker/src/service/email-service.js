@@ -26,7 +26,7 @@ import telegramService from './telegram-service';
 import webhookService from './webhook-service';
 import forwardMime from '../utils/forward-mime';
 import verifyUtils from '../utils/verify-utils';
-import { withAccountLock } from './account-deletion-state';
+import { withAccountLock, withAccountLocks } from './account-deletion-state';
 
 const emailService = {
 
@@ -1201,9 +1201,18 @@ const emailService = {
 	async physicsDelete(c, params) {
 		let { emailIds } = params;
 		emailIds = emailIds.split(',').map(Number);
-		await attService.removeByEmailIds(c, emailIds);
-		await starService.removeByEmailIds(c, emailIds);
-		await orm(c).delete(email).where(inArray(email.emailId, emailIds)).run();
+		const rows = await orm(c).select({userId:email.userId}).from(email).where(inArray(email.emailId, emailIds)).all();
+		const userIds = [...new Set(rows.map(row => Number(row.userId)).filter(id => Number.isSafeInteger(id) && id > 0))];
+		const remove = async () => {
+			for (const userId of userIds) {
+				const request = await c.env.db.prepare('SELECT 1 AS present FROM account_deletion_request WHERE user_id=?').bind(userId).first();
+				if (request) throw new BizError('账号正在等待恢复或清理，无法通过此入口删除邮件');
+			}
+			await attService.removeByEmailIds(c, emailIds);
+			await starService.removeByEmailIds(c, emailIds);
+			await orm(c).delete(email).where(inArray(email.emailId, emailIds)).run();
+		};
+		return userIds.length ? withAccountLocks(c.env.db, userIds, remove) : remove();
 	},
 
 	async physicsDeleteUserIds(c, userIds) {
@@ -1406,7 +1415,8 @@ const emailService = {
 		const batchSize = 95;
 
 		while (true) {
-			const conditions = [lt(email.createTime, cutoff)];
+			const conditions = [lt(email.createTime, cutoff),
+				sql`NOT EXISTS (SELECT 1 FROM account_deletion_request WHERE user_id = ${email.userId})`];
 			if (excludeUserIds.length) {
 				conditions.push(notInArray(email.userId, excludeUserIds));
 			}
@@ -1472,9 +1482,10 @@ const emailService = {
 			return;
 		}
 
-		await attService.removeByEmailIds(c, emailIds);
-
-		await orm(c).delete(email).where(conditions.length > 1 ? and(...conditions) : conditions[0]).run();
+		// Keep each IN query within D1's bind-parameter limit.
+		for (let offset = 0; offset < emailIds.length; offset += 90) {
+			await this.physicsDelete(c, {emailIds:emailIds.slice(offset, offset + 90).join(',')});
+		}
 	},
 
 	async physicsDeleteByAccountId(c, accountId) {
