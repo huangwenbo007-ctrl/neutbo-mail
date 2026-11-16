@@ -224,6 +224,20 @@ const attService = {
 				attData.accountId = accountId;
 				attData.type = attConst.type.EMBED;
 				if (!attData.buff) {
+					// An existing inline image was read before obtaining the object
+					// reservation. The last source reference and object may have
+					// disappeared in the meantime. Restore the already-read bytes
+					// before publishing a new reference, or fail closed.
+					const source = await c.env.db.prepare('SELECT 1 AS present FROM attachments WHERE key=? LIMIT 1').bind(attData.key).first();
+					if (!source) {
+						const content = attData.content;
+						if (!(content instanceof ArrayBuffer) && !ArrayBuffer.isView(content)) throw new Error('Inline image is no longer available');
+						await this.putAttachment(c, reservation, attData.key, content, {
+							contentType: attData.mimeType,
+							cacheControl: `max-age=259200`,
+							contentDisposition: `inline;filename=${attData.filename}`
+						});
+					}
 					continue;
 				}
 				await this.putAttachment(c, reservation, attData.key, attData.buff, {

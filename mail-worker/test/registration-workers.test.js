@@ -679,6 +679,25 @@ it('records origins for embedded attachments but never guesses for reference-onl
   expect(await env.db.prepare('SELECT state FROM attachment_object_origin WHERE object_key=?').bind(referenced).first()).toBeNull();
 });
 
+it('restores an inline image removed between reading and saving its new reference', async () => {
+  const key='attachments/inline-race.png';
+  const bytes=new TextEncoder().encode('inline image bytes');
+  await attService.addAtt({env},[{key,userId:1,accountId:1,emailId:45,filename:'inline.png',mimeType:'image/png',content:bytes}]);
+  await attService.removeByEmailIds({env},[45]);
+  expect(await processTestKvAttachment({env},{userId:0,storageType:'KV',key},'inline-cleaner',100)).toBe('deleted');
+  expect(await env.kv.get(key)).toBeNull();
+  await attService.saveArticleAtt({env},[{key,content:bytes,filename:'inline.png',mimeType:'image/png'}],1,1,44);
+  expect(await env.kv.get(key)).toBe('inline image bytes');
+  expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE key=? AND email_id=44').bind(key).first()).n).toBe(1);
+  expect((await env.db.prepare('SELECT state FROM attachment_object_origin WHERE object_key=?').bind(key).first()).state).toBe('known');
+});
+
+it('does not create a dangling inline image reference when the bytes are unavailable', async () => {
+  const key='attachments/missing-inline.png';
+  await expect(attService.saveArticleAtt({env},[{key,filename:'inline.png',mimeType:'image/png'}],1,1,44)).rejects.toThrow('Inline image is no longer available');
+  expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE key=?').bind(key).first()).n).toBe(0);
+});
+
 it('keeps a new shared KV attachment until its final reference is removed', async () => {
   const key='attachments/new-shared-flow.txt';
   const record=(userId,emailId)=>({key,userId,accountId:userId,emailId,filename:'file.txt',mimeType:'text/plain',content:new TextEncoder().encode('same')});
