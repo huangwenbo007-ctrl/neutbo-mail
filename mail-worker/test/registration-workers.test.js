@@ -259,13 +259,13 @@ it('does not stage an accidentally reactivated account for purge in D1', async (
   expect(await requestDeletion(env.db, user.user_id, now - 31 * 86400)).toBe(true);
   expect(await claimDeletion(env.db, user.user_id, now)).toBe(true);
   await env.db.prepare('UPDATE user SET is_del=0 WHERE user_id=?').bind(user.user_id).run();
-  await stagePurge(env.db, user.user_id, 'KV');
+  await stagePurge(env.db, user.user_id);
   expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(user.user_id).first()).n).toBe(1);
   expect((await env.db.prepare('SELECT count(*) AS n FROM account WHERE user_id=?').bind(user.user_id).first()).n).toBe(1);
   expect((await env.db.prepare('SELECT user_id FROM role WHERE role_id=1').first()).user_id).toBe(user.user_id);
   await env.db.prepare('UPDATE user SET is_del=1 WHERE user_id=?').bind(user.user_id).run();
-  await stagePurge(env.db, user.user_id, 'KV');
-  await stagePurge(env.db, user.user_id, 'KV');
+  await stagePurge(env.db, user.user_id);
+  await stagePurge(env.db, user.user_id);
   expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
   expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(other.user_id).first()).n).toBe(1);
   expect((await env.db.prepare('SELECT count(*) AS n FROM account WHERE user_id=?').bind(other.user_id).first()).n).toBe(1);
@@ -292,6 +292,27 @@ it('preserves shared attachments and retries failed cleanup in Workers bindings'
   expect(await env.kv.get(own)).toBe('private data');
   expect(await processQueuedObject(env.db, {userId:1, storageType:'KV', key:own}, 'retry-cleaner', 102, remove)).toBe('deleted');
   expect(await env.kv.get(own)).toBeNull();
+});
+
+it('queues removed attachments without deleting objects shared with another mailbox', async () => {
+  const shared = 'attachments/legacy-shared';
+  const own = 'attachments/legacy-private';
+  await env.kv.put(shared, 'shared content');
+  await env.kv.put(own, 'private content');
+  await env.db.batch([
+    env.db.prepare('INSERT INTO attachments (user_id,email_id,account_id,key) VALUES (1,10,1,?)').bind(shared),
+    env.db.prepare('INSERT INTO attachments (user_id,email_id,account_id,key) VALUES (1,10,1,?)').bind(own),
+    env.db.prepare('INSERT INTO attachments (user_id,email_id,account_id,key) VALUES (2,20,2,?)').bind(shared),
+  ]);
+  await attService.removeByEmailIds({env}, [10, 10]);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE email_id=10').first()).n).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE email_id=20').first()).n).toBe(1);
+  expect(await env.kv.get(shared)).toBe('shared content');
+  expect(await env.kv.get(own)).toBe('private content');
+  expect((await env.db.prepare("SELECT count(*) AS n FROM account_deletion_object_queue WHERE user_id=0 AND storage_type='UNRESOLVED' AND object_key IN (?,?)").bind(shared,own).first()).n).toBe(2);
+  await expect(processQueuedObject(env.db, {userId:0,storageType:'UNRESOLVED',key:own}, 'cleaner', 123, async () => {})).rejects.toThrow('Invalid object reservation');
+  await attService.removeByEmailIds({env}, [10]);
+  expect((await env.db.prepare("SELECT count(*) AS n FROM account_deletion_object_queue WHERE user_id=0 AND storage_type='UNRESOLVED'").first()).n).toBe(2);
 });
 
 it('rejects new mail for an account awaiting deletion', async () => {

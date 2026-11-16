@@ -52,20 +52,19 @@ export async function claimDeletion(db, userId, now) {
 
 // Draft only: queue file keys before removing their metadata. A separate,
 // coordinated object cleaner is required; this function never deletes files.
-export async function stagePurge(db, userId, storageType) {
-	if (!['KV', 'R2', 'S3'].includes(storageType)) throw new Error('Unknown attachment storage');
+export async function stagePurge(db, userId) {
 	return withAccountLock(db, userId, async () => {
 		// Fail closed if legacy code has reactivated the user. A missing user is
 		// allowed so retries remain harmless after metadata was already staged.
 		const stillPurging = "EXISTS (SELECT 1 FROM account_deletion_request WHERE user_id = ? AND state = 'purging') AND NOT EXISTS (SELECT 1 FROM user WHERE user_id = ? AND is_del IS NOT 1)";
 		await db.batch([
 			db.prepare(`INSERT OR IGNORE INTO account_deletion_object_queue (user_id, storage_type, object_key)
-				SELECT DISTINCT ?, ?, key FROM attachments WHERE user_id = ? AND ${stillPurging}`)
-				.bind(userId, storageType, userId, userId, userId),
+				SELECT DISTINCT ?, 'UNRESOLVED', key FROM attachments WHERE user_id = ? AND ${stillPurging}`)
+				.bind(userId, userId, userId, userId),
 			db.prepare(`INSERT OR IGNORE INTO account_deletion_object_queue (user_id, storage_type, object_key)
-				SELECT DISTINCT ?, ?, f.object_key FROM inbound_attachment_failure f
+				SELECT DISTINCT ?, 'UNRESOLVED', f.object_key FROM inbound_attachment_failure f
 				JOIN email e ON e.email_id = f.email_id WHERE e.user_id = ? AND ${stillPurging}`)
-				.bind(userId, storageType, userId, userId, userId),
+				.bind(userId, userId, userId, userId),
 			db.prepare(`DELETE FROM inbound_attachment_failure WHERE email_id IN
 				(SELECT email_id FROM email WHERE user_id = ?) AND ${stillPurging}`).bind(userId, userId, userId),
 			// These objects may be used by other users. Preserve them while

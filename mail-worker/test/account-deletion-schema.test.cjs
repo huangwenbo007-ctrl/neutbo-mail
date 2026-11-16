@@ -120,26 +120,27 @@ test('stages attachment keys and removes only the claimed user metadata', async 
     prepare(sql) { return { bind(...args) { return {run() { return {meta:{changes:Number(raw.prepare(sql).run(...args).changes)}}; }}; } }; },
     async batch(statements) { raw.exec('BEGIN'); try { const out = statements.map(s => s.run()); raw.exec('COMMIT'); return out; } catch (e) {raw.exec('ROLLBACK'); throw e;} },
   };
-  await stagePurge(db, 1, 'KV');
+  await stagePurge(db, 1);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM user').get().n, 2);
   raw.exec("UPDATE account_deletion_request SET state = 'purging' WHERE user_id = 1");
   raw.exec('UPDATE user SET is_del = 0 WHERE user_id = 1');
-  await stagePurge(db, 1, 'KV');
+  await stagePurge(db, 1);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM user WHERE user_id=1').get().n, 1);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM account_deletion_object_queue').get().n, 0);
   assert.equal(raw.prepare('SELECT user_id FROM role WHERE role_id=10').get().user_id, 1);
   assert.equal(raw.prepare('SELECT user_id FROM reg_key WHERE rege_key_id=100').get().user_id, 1);
   raw.exec('UPDATE user SET is_del = 1 WHERE user_id = 1');
   raw.exec("CREATE TRIGGER fail_purge BEFORE DELETE ON email BEGIN SELECT RAISE(ABORT, 'simulated failure'); END");
-  await assert.rejects(stagePurge(db, 1, 'KV'));
+  await assert.rejects(stagePurge(db, 1));
   assert.equal(raw.prepare('SELECT count(*) AS n FROM attachments WHERE user_id=1').get().n, 2);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM account_deletion_object_queue').get().n, 0);
   raw.exec('DROP TRIGGER fail_purge');
-  await stagePurge(db, 1, 'KV');
-  await stagePurge(db, 1, 'KV'); // A retry must be harmless.
+  await stagePurge(db, 1);
+  await stagePurge(db, 1); // A retry must be harmless.
   assert.equal(raw.prepare('SELECT count(*) AS n FROM user WHERE user_id=1').get().n, 0);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM attachments WHERE user_id=2 AND key=\'shared\'').get().n, 1);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM account_deletion_object_queue WHERE user_id=1').get().n, 3);
+  assert.equal(raw.prepare("SELECT count(*) AS n FROM account_deletion_object_queue WHERE user_id=1 AND storage_type='UNRESOLVED'").get().n, 3);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM inbound_attachment_failure WHERE email_id=11').get().n, 0);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM inbound_attachment_failure WHERE email_id=22').get().n, 1);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM email WHERE user_id=2').get().n, 1);
@@ -147,7 +148,6 @@ test('stages attachment keys and removes only the claimed user metadata', async 
   assert.equal(raw.prepare('SELECT user_id FROM role WHERE role_id=20').get().user_id, 2);
   assert.equal(raw.prepare('SELECT user_id FROM reg_key WHERE rege_key_id=100').get().user_id, 0);
   assert.equal(raw.prepare('SELECT user_id FROM reg_key WHERE rege_key_id=200').get().user_id, 2);
-  await assert.rejects(stagePurge(db, 2, 'invalid'));
   raw.close();
 });
 

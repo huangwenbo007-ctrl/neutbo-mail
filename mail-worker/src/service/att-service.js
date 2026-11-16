@@ -219,53 +219,19 @@ const attService = {
 	},
 
 	async removeAttByField(c, fieldName, fieldValues) {
-
-		const sqlList = [];
-
-		fieldValues.forEach(value => {
-
-			sqlList.push(
-
-				c.env.db.prepare(
-					`SELECT a.key, a.att_id
-						FROM attachments a
-							   JOIN (SELECT key
-									 FROM attachments
-									 GROUP BY key
-									 HAVING COUNT (*) = 1) t
-									ON a.key = t.key
-						WHERE a.${fieldName} = ?;`
-					).bind(value)
-			)
-
-			sqlList.push(c.env.db.prepare(`DELETE FROM attachments WHERE ${fieldName} = ?`).bind(value))
-
-		});
-
-		const attListResult = await c.env.db.batch(sqlList);
-
-		const delKeyList = attListResult.flatMap(r => r.results ? r.results.map(row => row.key) : []);
-
-		if (delKeyList.length > 0) {
-			try {
-				await this.batchDelete(c, delKeyList);
-			} catch (e) {
-				console.error('删除附件文件失败：', e);
-			}
+		if (!['user_id', 'email_id', 'account_id'].includes(fieldName)) throw new Error('Invalid attachment field');
+		if (!Array.isArray(fieldValues) || fieldValues.length === 0) return;
+		const statements = [];
+		for (const value of new Set(fieldValues)) {
+			// Old objects do not record their storage origin. Queue them as
+			// unresolved rather than deleting a shared file or guessing a bucket.
+			// The queue and reference removal are committed together.
+			statements.push(c.env.db.prepare(`INSERT OR IGNORE INTO account_deletion_object_queue
+				(user_id, storage_type, object_key)
+				SELECT 0, 'UNRESOLVED', key FROM attachments WHERE ${fieldName} = ?`).bind(value));
+			statements.push(c.env.db.prepare(`DELETE FROM attachments WHERE ${fieldName} = ?`).bind(value));
 		}
-
-	},
-
-	async batchDelete(c, keys) {
-		if (!keys.length) return;
-
-		const BATCH_SIZE = 1000;
-
-		for (let i = 0; i < keys.length; i += BATCH_SIZE) {
-			const batch = keys.slice(i, i + BATCH_SIZE);
-			await r2Service.delete(c, batch);
-		}
-
+		await c.env.db.batch(statements);
 	},
 
 	async removeByAccountId(c, accountId) {

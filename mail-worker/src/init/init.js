@@ -53,6 +53,10 @@ const dbInit = {
 			state TEXT NOT NULL CHECK (state IN ('pending', 'purging')),
 			CHECK (purge_after >= requested_at + 2592000)
 		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_deletion_object_queue (
+			storage_type TEXT NOT NULL, object_key TEXT NOT NULL, user_id INTEGER NOT NULL,
+			PRIMARY KEY(user_id, storage_type, object_key)
+		)`).run();
 		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS attachment_object_lock (
 			storage_type TEXT NOT NULL, object_key TEXT PRIMARY KEY, owner_token TEXT NOT NULL, created_at INTEGER NOT NULL
 		)`).run();
