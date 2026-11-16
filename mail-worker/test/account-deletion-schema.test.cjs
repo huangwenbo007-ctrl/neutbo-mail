@@ -107,7 +107,7 @@ test('stages attachment keys and removes only the claimed user metadata', async 
   raw.exec(readFileSync(join(__dirname, '../migrations/account-deletion-draft.sql'), 'utf8'));
   raw.exec(`CREATE TABLE user (user_id INTEGER PRIMARY KEY, is_del INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE star (user_id INTEGER); CREATE TABLE email (email_id INTEGER PRIMARY KEY, user_id INTEGER);
-    CREATE TABLE account (user_id INTEGER); CREATE TABLE oauth (user_id INTEGER);
+    CREATE TABLE account (user_id INTEGER); CREATE TABLE oauth (user_id INTEGER, oauth_id INTEGER);
     CREATE TABLE role (role_id INTEGER PRIMARY KEY, user_id INTEGER);
     CREATE TABLE reg_key (rege_key_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE attachments (user_id INTEGER, key TEXT);

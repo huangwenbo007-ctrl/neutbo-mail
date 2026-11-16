@@ -5,6 +5,7 @@ import userContext from '../security/user-context';
 import BizError from '../error/biz-error';
 import { requestPasswordDeletion, changePasswordWithReauth } from '../service/account-reauth-draft';
 import { startGoogleDeletion, completeGoogleDeletion } from '../service/google-deletion-draft';
+import { sendGoogleEmailDeletionCode, completeGoogleEmailDeletion } from '../service/google-email-deletion-draft';
 
 app.get('/my/loginUserInfo', async (c) => {
 	const user = await userService.loginUserInfo(c, userContext.getUserId(c));
@@ -46,6 +47,16 @@ app.post('/my/delete/google/start', async (c) => {
 app.post('/my/delete/google/complete', async (c) => {
 	if (c.env.account_deletion_test_only !== 'enabled') throw new BizError('账号删除功能暂不可用');
 	return c.json(result.ok(await completeGoogleDeletion(c, await c.req.json())));
+});
+
+app.post('/my/delete/google-email/send', async (c) => {
+	if (c.env.account_deletion_test_only !== 'enabled') throw new BizError('账号删除功能暂不可用');
+	return c.json(result.ok(await sendGoogleEmailDeletionCode(c)));
+});
+
+app.post('/my/delete/google-email/complete', async (c) => {
+	if (c.env.account_deletion_test_only !== 'enabled') throw new BizError('账号删除功能暂不可用');
+	return c.json(result.ok(await completeGoogleEmailDeletion(c, await c.req.json())));
 });
 
 

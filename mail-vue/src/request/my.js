@@ -20,3 +20,11 @@ export function completeGoogleDeletion(code, state) {
     return http.post('/my/delete/google/complete', {code, state, confirmation:'DELETE'})
 }
 
+export function sendGoogleDeletionEmail() {
+    return http.post('/my/delete/google-email/send', {})
+}
+
+export function completeGoogleEmailDeletion(code) {
+    return http.post('/my/delete/google-email/complete', {code, confirmation:'DELETE'})
+}
+

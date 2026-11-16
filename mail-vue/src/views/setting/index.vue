@@ -78,14 +78,21 @@
         <el-button type="primary" :loading="setPwdLoading" @click="submitPwd">{{$t('save')}}</el-button>
       </div>
     </el-dialog>
-    <el-dialog v-model="deleteDialogVisible" :title="$t('deleteUser')" width="min(420px, 90vw)" @closed="deletePassword = ''">
+    <el-dialog v-model="deleteDialogVisible" :title="$t('deleteUser')" width="min(420px, 90vw)" @closed="clearDeletionForm">
       <p>{{ $t('deletionGraceInfo') }}</p>
-      <p>{{ $t('deletionOAuthHelp') }}</p>
+      <p>{{ $t('deletionCurrentPassword') }}</p>
       <el-input v-model="deletePassword" type="password" show-password autocomplete="current-password"
         :placeholder="$t('deletionCurrentPassword')" @keyup.enter="submitDeletion" />
+      <template v-if="userStore.user.googleLinked">
+        <p>{{ $t('deletionEmailHelp') }}</p>
+        <el-button :loading="deleteLoading" @click="sendDeletionEmail">{{ $t('deletionSendEmail') }}</el-button>
+        <p v-if="deleteEmailMask">{{ $t('deletionEmailSent', {email: deleteEmailMask}) }}</p>
+        <el-input v-model="deleteEmailCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code"
+          :placeholder="$t('deletionEmailCode')" />
+      </template>
       <template #footer>
         <el-button @click="deleteDialogVisible = false">{{ $t('cancel') }}</el-button>
-        <el-button v-if="userStore.user.googleLinked" :loading="deleteLoading" @click="submitGoogleDeletion">{{ $t('deletionWithGoogle') }}</el-button>
+        <el-button v-if="userStore.user.googleLinked" :loading="deleteLoading" @click="submitGoogleEmailDeletion">{{ $t('deletionEmailSubmit') }}</el-button>
         <el-button type="danger" :loading="deleteLoading" @click="submitDeletion">{{ $t('deletionSubmit') }}</el-button>
       </template>
     </el-dialog>
@@ -95,7 +102,7 @@
 </template>
 <script setup>
 import {reactive, ref, defineOptions} from 'vue'
-import {resetPassword, requestDeletion, startGoogleDeletion} from "@/request/my.js";
+import {resetPassword, requestDeletion, sendGoogleDeletionEmail, completeGoogleEmailDeletion} from "@/request/my.js";
 import {useUserStore} from "@/store/user.js";
 import router from "@/router/index.js";
 import {accountSetName} from "@/request/account.js";
@@ -187,6 +194,14 @@ const deletionDraftEnabled = import.meta.env.VITE_ACCOUNT_DELETION_TEST_ONLY ===
 const deleteDialogVisible = ref(false)
 const deletePassword = ref('')
 const deleteLoading = ref(false)
+const deleteEmailCode = ref('')
+const deleteEmailMask = ref('')
+
+function clearDeletionForm() {
+  deletePassword.value = ''
+  deleteEmailCode.value = ''
+  deleteEmailMask.value = ''
+}
 
 async function submitDeletion() {
   if (deleteLoading.value || !deletionDraftEnabled) return
@@ -209,22 +224,35 @@ async function submitDeletion() {
   }
 }
 
-async function submitGoogleDeletion() {
+async function sendDeletionEmail() {
   if (deleteLoading.value || !deletionDraftEnabled) return
   deleteLoading.value = true
   try {
-    const data = await startGoogleDeletion()
-    const url = new URL(data.url)
-    const state = url.searchParams.get('state')
-    if (url.origin !== 'https://accounts.google.com' || url.pathname !== '/o/oauth2/v2/auth' || !/^[a-f0-9]{64}$/.test(state || '')) throw new Error('Invalid Google authorization request')
-    sessionStorage.setItem('googleDeletionState', state)
-    window.location.assign(url.toString())
+    const data = await sendGoogleDeletionEmail()
+    deleteEmailMask.value = data.maskedEmail
   } catch (_) {
-    ElMessage.error(t('deletionGoogleFailed'))
+    // The request interceptor reports errors.
+  } finally {
     deleteLoading.value = false
   }
 }
 
+async function submitGoogleEmailDeletion() {
+  if (deleteLoading.value || !deletionDraftEnabled) return
+  if (!/^\d{6}$/.test(deleteEmailCode.value)) return ElMessage.error(t('deletionEmailCode'))
+  deleteLoading.value = true
+  try {
+    await completeGoogleEmailDeletion(deleteEmailCode.value)
+    deleteDialogVisible.value = false
+    localStorage.removeItem('token')
+    await router.replace('/login')
+    ElMessage.success(t('deletionRequested'))
+  } catch (_) {
+    // The request interceptor reports errors.
+  } finally {
+    deleteLoading.value = false
+  }
+}
 
 function submitPwd() {
 

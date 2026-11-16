@@ -636,14 +636,115 @@ it.each([
   expect(result.data).toBeUndefined();
 });
 
-async function googleLogin(subject = 'google-test-user') {
+async function googleLogin(subject = 'google-test-user', emailVerified = true) {
   fetchMock.get('https://oauth2.googleapis.com').intercept({path:'/token', method:'POST'}).reply(200, options => {
     expect(new URLSearchParams(options.body).get('code_verifier')).toBe('a'.repeat(64));
     return JSON.stringify({access_token:'mock-google-access-token'});
   });
-  fetchMock.get('https://openidconnect.googleapis.com').intercept({path:'/v1/userinfo', method:'GET'}).reply(200, JSON.stringify({sub:subject, email:'person@gmail.com', email_verified:true, name:'Test'}));
+  fetchMock.get('https://openidconnect.googleapis.com').intercept({path:'/v1/userinfo', method:'GET'}).reply(200, JSON.stringify({sub:subject, email:'person@gmail.com', email_verified:emailVerified, name:'Test'}));
   return post('/oauth/google/login', {code:'mock-auth-code',redirectUri:'https://local.test/login',codeVerifier:'a'.repeat(64)});
 }
+
+it('only remembers Google email from verified server-side Google userinfo', async () => {
+  await env.db.prepare("UPDATE setting SET google_switch=0, google_client_id='test-client', google_client_secret='test-secret'").run();
+  await refresh();
+  const first = await googleLogin('verified-google-contact', true);
+  const id = first.data.userInfo.oauthId;
+  expect(await env.db.prepare('SELECT subject,email FROM google_verified_contact WHERE oauth_id=?').bind(id).first())
+    .toMatchObject({subject:'verified-google-contact',email:'person@gmail.com'});
+  await googleLogin('verified-google-contact', false);
+  expect(await env.db.prepare('SELECT email FROM google_verified_contact WHERE oauth_id=?').bind(id).first()).toBeNull();
+});
+
+it('sends deletion code only to verified Google contact and binds it to one session', async () => {
+  const verified = await proof('email-code-reg@external.test');
+  expect((await post('/register',{email:'email-code@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user = await env.db.prepare("SELECT user_id FROM user WHERE email='email-code@example.com'").first();
+  await env.db.prepare("INSERT INTO oauth (user_id,platform,oauth_user_id,username) VALUES (?,'google','subject-email-code','unverified@attacker.test')").bind(user.user_id).run();
+  const oauth = await env.db.prepare("SELECT oauth_id FROM oauth WHERE oauth_user_id='subject-email-code'").first();
+  await env.db.prepare('INSERT OR IGNORE INTO role_perm (role_id,perm_id) VALUES (1,5)').run();
+  const first = await post('/login',{email:'email-code@example.com',password:'test-password'});
+  const second = await post('/login',{email:'email-code@example.com',password:'test-password'});
+  const call = async (path,token,body={}) => (await SELF.fetch('https://local.test/api'+path,{method:'POST',
+    headers:{Authorization:token,'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  const send = token => call('/my/delete/google-email/send',token,{email:'attacker@external.test'});
+  const complete = (token,code) => call('/my/delete/google-email/complete',token,{code,confirmation:'DELETE'});
+  expect((await send(first.data.token)).code).not.toBe(200);
+  await env.db.prepare('INSERT INTO google_verified_contact VALUES (?,?,?)').bind(oauth.oauth_id,'subject-email-code','verified@gmail.com').run();
+  let code;
+  fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,options=>{
+    const mail = JSON.parse(options.body);
+    expect(mail.to).toEqual(['verified@gmail.com']);
+    code=mail.text.match(/\b\d{6}\b/)[0];
+    return JSON.stringify({id:'sent'});
+  });
+  const sent=await send(first.data.token);
+  expect(sent.code).toBe(200);
+  expect(sent.data.maskedEmail).toBe('v***@gmail.com');
+  expect((await send(first.data.token)).code).not.toBe(200);
+  expect((await complete(second.data.token,code)).code).not.toBe(200);
+  expect((await complete(first.data.token,code==='000000'?'000001':'000000')).code).not.toBe(200);
+  expect((await complete(first.data.token,code)).code).toBe(200);
+  const request=await env.db.prepare('SELECT state,purge_after,requested_at FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first();
+  expect(request.state).toBe('pending');
+  expect(request.purge_after-request.requested_at).toBe(2592000);
+  expect((await complete(first.data.token,code)).code).not.toBe(200);
+  expect((await post('/login',{email:'email-code@example.com',password:'test-password'})).code).not.toBe(200);
+});
+
+it('rejects expired codes and changes of Google contact or subject', async () => {
+  const verified = await proof('email-race-reg@external.test');
+  expect((await post('/register',{email:'email-race@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='email-race@example.com'").first();
+  await env.db.prepare("INSERT INTO oauth (user_id,platform,oauth_user_id) VALUES (?,'google','subject-email-race')").bind(user.user_id).run();
+  const oauth=await env.db.prepare("SELECT oauth_id FROM oauth WHERE oauth_user_id='subject-email-race'").first();
+  await env.db.prepare('INSERT INTO google_verified_contact VALUES (?,?,?)').bind(oauth.oauth_id,'subject-email-race','verified@gmail.com').run();
+  await env.db.prepare('INSERT OR IGNORE INTO role_perm (role_id,perm_id) VALUES (1,5)').run();
+  const login=await post('/login',{email:'email-race@example.com',password:'test-password'});
+  const call=async(path,body={})=>(await SELF.fetch('https://local.test/api'+path,{method:'POST',headers:{Authorization:login.data.token,'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  let code;
+  const mock=()=>fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,o=>{code=JSON.parse(o.body).text.match(/\b\d{6}\b/)[0];return JSON.stringify({id:'sent'});});
+  mock(); expect((await call('/my/delete/google-email/send')).code).toBe(200);
+  await env.db.prepare('UPDATE google_email_deletion_code SET expires_at=0,sent_at=0 WHERE user_id=?').bind(user.user_id).run();
+  expect((await call('/my/delete/google-email/complete',{code,confirmation:'DELETE'})).code).not.toBe(200);
+  mock(); expect((await call('/my/delete/google-email/send')).code).toBe(200);
+  await env.db.prepare("UPDATE google_verified_contact SET email='new@gmail.com' WHERE oauth_id=?").bind(oauth.oauth_id).run();
+  expect((await call('/my/delete/google-email/complete',{code,confirmation:'DELETE'})).code).not.toBe(200);
+  await env.db.prepare('UPDATE google_email_deletion_code SET sent_at=0 WHERE user_id=?').bind(user.user_id).run();
+  mock(); expect((await call('/my/delete/google-email/send')).code).toBe(200);
+  const wrong=code==='000000'?'000001':'000000';
+  for (let i=0;i<5;i++) expect((await call('/my/delete/google-email/complete',{code:wrong,confirmation:'DELETE'})).code).not.toBe(200);
+  expect((await call('/my/delete/google-email/complete',{code,confirmation:'DELETE'})).code).not.toBe(200);
+  await env.db.prepare('UPDATE google_email_deletion_code SET sent_at=0 WHERE user_id=?').bind(user.user_id).run();
+  mock(); expect((await call('/my/delete/google-email/send')).code).toBe(200);
+  await env.db.prepare("UPDATE oauth SET oauth_user_id='other-subject' WHERE oauth_id=?").bind(oauth.oauth_id).run();
+  expect((await call('/my/delete/google-email/complete',{code,confirmation:'DELETE'})).code).not.toBe(200);
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+});
+
+it('refuses a Google contact hosted by the mailbox service and invalidates codes after send failure', async () => {
+  const verified=await proof('email-provider-reg@external.test');
+  expect((await post('/register',{email:'email-provider@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='email-provider@example.com'").first();
+  await env.db.prepare("INSERT INTO oauth (user_id,platform,oauth_user_id) VALUES (?,'google','provider-subject')").bind(user.user_id).run();
+  const oauth=await env.db.prepare("SELECT oauth_id FROM oauth WHERE oauth_user_id='provider-subject'").first();
+  await env.db.prepare('INSERT INTO google_verified_contact VALUES (?,?,?)').bind(oauth.oauth_id,'provider-subject','another@example.com').run();
+  await env.db.prepare('INSERT OR IGNORE INTO role_perm (role_id,perm_id) VALUES (1,5)').run();
+  const login=await post('/login',{email:'email-provider@example.com',password:'test-password'});
+  const call=async(path,body={})=>(await SELF.fetch('https://local.test/api'+path,{method:'POST',headers:{Authorization:login.data.token,'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  expect((await call('/my/delete/google-email/send')).code).not.toBe(200);
+  await env.db.prepare("UPDATE google_verified_contact SET email='verified@gmail.com' WHERE oauth_id=?").bind(oauth.oauth_id).run();
+  let code;
+  fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(403,o=>{
+    code=JSON.parse(o.body).text.match(/\b\d{6}\b/)[0]; return JSON.stringify({name:'validation_error',message:'sensitive provider error'});
+  });
+  const failed=await call('/my/delete/google-email/send');
+  expect(failed.code).not.toBe(200);
+  expect(failed.message).not.toContain('sensitive');
+  expect((await call('/my/delete/google-email/complete',{code,confirmation:'DELETE'})).code).not.toBe(200);
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(0);
+});
 
 it('requires Google binding proof and external email verification, and supports subsequent login', async () => {
   await env.db.prepare("UPDATE setting SET google_switch=0, google_client_id='test-client', google_client_secret='test-secret'").run();

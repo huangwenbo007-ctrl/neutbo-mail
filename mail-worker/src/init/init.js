@@ -52,6 +52,18 @@ const dbInit = {
 			user_id INTEGER PRIMARY KEY, state TEXT NOT NULL UNIQUE, session_hash TEXT NOT NULL,
 			nonce TEXT NOT NULL, verifier TEXT NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL
 		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS google_verified_contact (
+			oauth_id INTEGER PRIMARY KEY, subject TEXT NOT NULL, email TEXT NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS google_email_deletion_code (
+			user_id INTEGER PRIMARY KEY, oauth_id INTEGER NOT NULL, subject TEXT NOT NULL, email TEXT NOT NULL,
+			session_hash TEXT NOT NULL, challenge TEXT NOT NULL, code_hash TEXT NOT NULL,
+			sent_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+			consumed INTEGER NOT NULL DEFAULT 0
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS google_email_deletion_rate (
+			user_id INTEGER PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL
+		)`).run();
 		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_deletion_request (
 			user_id INTEGER PRIMARY KEY, requested_at INTEGER NOT NULL, purge_after INTEGER NOT NULL,
 			state TEXT NOT NULL CHECK (state IN ('pending', 'purging')),
