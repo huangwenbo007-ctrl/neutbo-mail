@@ -9,7 +9,7 @@ import { email as receiveEmail } from '../src/email/email';
 import attService from '../src/service/att-service';
 import emailService from '../src/service/email-service';
 import fileUtils from '../src/utils/file-utils';
-import { checkPasswordReauth } from '../src/service/account-reauth-draft';
+import { checkPasswordReauth, requestPasswordDeletion } from '../src/service/account-reauth-draft';
 import { acquireObjectLock, releaseObjectLock } from '../src/service/account-deletion-state';
 
 const requestDeletion = (db, userId, now) => requestDeletionRaw(db, userId, now, 'admin@example.com');
@@ -92,6 +92,33 @@ it('limits concurrent password reauthentication attempts per account', async () 
   expect(await checkPasswordReauth(env.db, user.user_id, 'test-password', now + 900)).toBe(true);
   await env.db.prepare('UPDATE user SET is_del=1 WHERE user_id=?').bind(user.user_id).run();
   expect(await checkPasswordReauth(env.db, user.user_id, 'test-password', now + 901)).toBe(false);
+});
+
+it('requests password deletion only with the correct password and protects the administrator', async () => {
+  const verified = await proof('password-delete-owner@external.test');
+  expect((await post('/register', {email:'password-delete@example.com', password:'test-password', ...verified})).code).toBe(200);
+  const user = await env.db.prepare("SELECT user_id FROM user WHERE email='password-delete@example.com'").first();
+  const now = Math.floor(Date.now() / 1000);
+  expect(await requestPasswordDeletion(env.db, user.user_id, 'wrong', now, 'admin@example.com')).toBe(false);
+  expect(await requestPasswordDeletion(env.db, user.user_id, 'test-password', now, 'Password-Delete@Example.com')).toBe(false);
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(0);
+  expect(await requestPasswordDeletion(env.db, user.user_id, 'test-password', now, 'admin@example.com')).toBe(true);
+  expect(await env.db.prepare('SELECT requested_at,purge_after,state FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first())
+    .toMatchObject({requested_at:now, purge_after:now + 2592000, state:'pending'});
+  expect((await env.db.prepare('SELECT generation FROM account_session_generation WHERE user_id=?').bind(user.user_id).first()).generation).toBe(1);
+});
+
+it('rejects a deletion if the password changed after verification', async () => {
+  const verified = await proof('racing-password-owner@external.test');
+  expect((await post('/register', {email:'racing-password@example.com', password:'test-password', ...verified})).code).toBe(200);
+  const user = await env.db.prepare("SELECT user_id FROM user WHERE email='racing-password@example.com'").first();
+  const db = {prepare:env.db.prepare.bind(env.db), async batch(statements) {
+    await env.db.prepare("UPDATE user SET password='changed-by-admin' WHERE user_id=?").bind(user.user_id).run();
+    return env.db.batch(statements);
+  }};
+  expect(await requestPasswordDeletion(db, user.user_id, 'test-password', Math.floor(Date.now()/1000), 'admin@example.com')).toBe(false);
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
 });
 
 it('rejects a pre-deletion session after deletion and after recovery', async () => {
