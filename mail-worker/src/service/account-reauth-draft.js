@@ -37,6 +37,25 @@ export async function checkPasswordReauth(db, userId, password, now) {
 	return Boolean(await passwordSnapshot(db, userId, password, now));
 }
 
+// Call only after session authentication. Existing sessions are invalidated
+// in the same database transaction as the credential change.
+export async function changePasswordWithReauth(db, userId, oldPassword, newPassword, now) {
+	if (typeof newPassword !== 'string' || newPassword.length < 6 || newPassword.length > 30) return false;
+	const snapshot = await passwordSnapshot(db, userId, oldPassword, now);
+	if (!snapshot) return false;
+	const next = await cryptoUtils.hashPassword(newPassword);
+	return withAccountLock(db, userId, async () => {
+		const result = await db.batch([
+			db.prepare(`UPDATE user SET password = ?, salt = ? WHERE user_id = ?
+				AND is_del = 0 AND status = 0 AND password = ? AND salt = ?`)
+				.bind(next.hash, next.salt, userId, snapshot.password, snapshot.salt),
+			db.prepare(`INSERT INTO account_session_generation (user_id, generation)
+				SELECT ?, 1 WHERE changes() = 1 ON CONFLICT(user_id) DO UPDATE SET generation = generation + 1`).bind(userId),
+		]);
+		return result.every(item => item.meta.changes === 1);
+	});
+}
+
 // Disconnected prototype. Authentication, identity and time must be supplied by
 // trusted server code. Never expose the credential snapshot as a client proof.
 export async function requestPasswordDeletion(db, userId, password, now, adminEmail) {

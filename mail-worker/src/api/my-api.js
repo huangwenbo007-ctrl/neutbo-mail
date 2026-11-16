@@ -3,7 +3,7 @@ import userService from '../service/user-service';
 import result from '../model/result';
 import userContext from '../security/user-context';
 import BizError from '../error/biz-error';
-import { requestPasswordDeletion } from '../service/account-reauth-draft';
+import { requestPasswordDeletion, changePasswordWithReauth } from '../service/account-reauth-draft';
 
 app.get('/my/loginUserInfo', async (c) => {
 	const user = await userService.loginUserInfo(c, userContext.getUserId(c));
@@ -11,9 +11,11 @@ app.get('/my/loginUserInfo', async (c) => {
 });
 
 app.put('/my/resetPassword', async (c) => {
-	// A session alone is not proof of identity for a sensitive credential change.
-	// Re-enable only with a verified flow for both password and OAuth accounts.
-	throw new BizError('修改密码功能暂不可用，请联系 support@neutbo.com');
+	const body = await c.req.json();
+	const ok = await changePasswordWithReauth(c.env.db, userContext.getUserId(c),
+		body?.oldPassword, body?.password, Math.floor(Date.now() / 1000));
+	if (!ok) throw new BizError('无法修改密码，请检查当前密码或稍后重试');
+	return c.json(result.ok());
 });
 
 app.delete('/my/delete', async (c) => {

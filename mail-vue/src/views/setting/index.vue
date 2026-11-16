@@ -69,8 +69,10 @@
         <el-button type="danger" :disabled="!deletionDraftEnabled" @click="deleteDialogVisible = true">{{$t('deleteUserBtn')}}</el-button>
       </div>
     </div>
-    <el-dialog v-model="pwdShow" :title="$t('changePassword')" width="340">
+    <el-dialog v-model="pwdShow" :title="$t('changePassword')" width="340" @closed="clearPasswordForm">
       <div class="update-pwd">
+        <p>{{ $t('passwordChangeHelp') }}</p>
+        <el-input type="password" :placeholder="$t('currentPassword')" v-model="form.oldPassword" autocomplete="current-password" @keyup.enter="submitPwd"/>
         <el-input type="password" :placeholder="$t('newPassword')" v-model="form.password" autocomplete="off" @keyup.enter="submitPwd"/>
         <el-input type="password" :placeholder="$t('confirmPassword')" v-model="form.newPwd" autocomplete="off" @keyup.enter="submitPwd"/>
         <el-button type="primary" :loading="setPwdLoading" @click="submitPwd">{{$t('save')}}</el-button>
@@ -168,9 +170,16 @@ function changeLang(lang) {
 
 const pwdShow = ref(false)
 const form = reactive({
+  oldPassword: '',
   password: '',
   newPwd: '',
 })
+
+function clearPasswordForm() {
+  form.oldPassword = ''
+  form.password = ''
+  form.newPwd = ''
+}
 
 // This build-time switch is for disposable environments only.
 const deletionDraftEnabled = import.meta.env.VITE_ACCOUNT_DELETION_TEST_ONLY === 'enabled'
@@ -204,6 +213,11 @@ function submitPwd() {
 
   if (setPwdLoading.value) return
 
+  if (!form.oldPassword) {
+    ElMessage.error(t('currentPassword'))
+    return
+  }
+
   if (!form.password) {
     ElMessage({
       message: t('emptyPwdMsg'),
@@ -232,16 +246,17 @@ function submitPwd() {
   }
 
   setPwdLoading.value = true
-  resetPassword(form.password).then(() => {
+  resetPassword(form.oldPassword, form.password).then(async () => {
     ElMessage({
-      message: t('saveSuccessMsg'),
+      message: t('passwordChangedLoginAgain'),
       type: 'success',
       plain: true,
     })
     pwdShow.value = false
     setPwdLoading.value = false
-    form.password = ''
-    form.newPwd = ''
+    clearPasswordForm()
+    localStorage.removeItem('token')
+    await router.replace('/login')
   }).catch(() => {
     setPwdLoading.value = false
   })

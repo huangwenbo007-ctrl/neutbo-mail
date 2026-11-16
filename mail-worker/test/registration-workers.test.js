@@ -10,7 +10,7 @@ import attService from '../src/service/att-service';
 import emailService from '../src/service/email-service';
 import fileUtils from '../src/utils/file-utils';
 import app from '../src/hono/webs';
-import { checkPasswordReauth, requestPasswordDeletion } from '../src/service/account-reauth-draft';
+import { checkPasswordReauth, requestPasswordDeletion, changePasswordWithReauth } from '../src/service/account-reauth-draft';
 import { acquireObjectLock, releaseObjectLock } from '../src/service/account-deletion-state';
 
 const requestDeletion = (db, userId, now) => requestDeletionRaw(db, userId, now, 'admin@example.com');
@@ -79,6 +79,36 @@ it('does not change the password using only an existing session', async () => {
   expect((await response.json()).code).not.toBe(200);
   expect((await post('/login', {email:'password-owner@example.com', password:'test-password'})).code).toBe(200);
   expect((await post('/login', {email:'password-owner@example.com', password:'replacement-password'})).code).not.toBe(200);
+});
+
+it('requires the current password and invalidates old sessions after password change', async () => {
+  const verified = await proof('password-change-owner@external.test');
+  expect((await post('/register', {email:'password-change@example.com', password:'test-password', ...verified})).code).toBe(200);
+  const login = await post('/login', {email:'password-change@example.com', password:'test-password'});
+  expect(login.code).toBe(200);
+  const change = async oldPassword => (await SELF.fetch('https://local.test/api/my/resetPassword', {
+    method:'PUT', headers:{Authorization:login.data.token, 'Content-Type':'application/json', 'CF-Connecting-IP':'192.0.2.20'},
+    body:JSON.stringify({oldPassword, password:'replacement-password'}),
+  })).json();
+  expect((await change('wrong-password')).code).not.toBe(200);
+  expect((await change('test-password')).code).toBe(200);
+  const oldSession = await SELF.fetch('https://local.test/api/my/loginUserInfo', {headers:{Authorization:login.data.token}});
+  expect((await oldSession.json()).code).not.toBe(200);
+  expect((await post('/login', {email:'password-change@example.com', password:'test-password'})).code).not.toBe(200);
+  expect((await post('/login', {email:'password-change@example.com', password:'replacement-password'})).code).toBe(200);
+});
+
+it('does not overwrite a password changed concurrently after verification', async () => {
+  const verified = await proof('password-race-owner@external.test');
+  expect((await post('/register', {email:'password-race@example.com', password:'test-password', ...verified})).code).toBe(200);
+  const user = await env.db.prepare("SELECT user_id FROM user WHERE email='password-race@example.com'").first();
+  const db = {prepare:env.db.prepare.bind(env.db), async batch(statements) {
+    await env.db.prepare("UPDATE user SET password='concurrent-change' WHERE user_id=?").bind(user.user_id).run();
+    return env.db.batch(statements);
+  }};
+  expect(await changePasswordWithReauth(db, user.user_id, 'test-password', 'replacement-password', Math.floor(Date.now()/1000))).toBe(false);
+  expect((await env.db.prepare('SELECT password FROM user WHERE user_id=?').bind(user.user_id).first()).password).toBe('concurrent-change');
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_session_generation WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
 });
 
 it('limits concurrent password reauthentication attempts per account', async () => {
