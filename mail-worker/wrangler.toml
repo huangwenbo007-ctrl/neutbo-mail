@@ -65,6 +65,8 @@ admin = "test-admin@neutbo.com"
 orm_log = false
 analysis_cache = false
 account_deletion_test_only = "enabled"
+attachment_origin_test_only = "enabled"
+attachment_kv_store_id = "kv:ff4ce2a4c9e54acaba715c2932060672"
 google_reauth_redirect_uri = "https://feature-account-deletion-grace-neutbo-mail.huangwenbo007.workers.dev/login"
 
 [[previews.d1_databases]]

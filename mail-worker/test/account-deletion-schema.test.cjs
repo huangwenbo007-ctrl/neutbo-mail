@@ -75,6 +75,7 @@ test('keeps shared objects and retries failed unshared object deletion', async (
   raw.exec(readFileSync(join(__dirname, '../migrations/account-deletion-draft.sql'), 'utf8'));
   raw.exec(`CREATE TABLE attachments (user_id INTEGER, key TEXT);
     INSERT INTO attachments VALUES (2, 'attachments/shared');
+    INSERT INTO attachment_object_origin VALUES ('attachments/shared', 'KV', 'isolated-test-kv', 'known');
     INSERT INTO account_deletion_object_queue VALUES ('KV', 'attachments/shared', 1), ('KV', 'attachments/private', 1);`);
   const db = {prepare(sql) {return {bind(...args) {return {
     async run() {return {meta:{changes:Number(raw.prepare(sql).run(...args).changes)}};},

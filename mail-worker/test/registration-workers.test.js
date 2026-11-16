@@ -14,6 +14,7 @@ import { checkPasswordReauth, requestPasswordDeletion, changePasswordWithReauth 
 import { verifyGoogleReauthToken } from '../src/service/google-reauth-draft';
 import { commitGoogleDeletion } from '../src/service/google-deletion-draft';
 import { acquireObjectLock, releaseObjectLock } from '../src/service/account-deletion-state';
+import { processTestKvAttachment } from '../src/service/attachment-cleanup-draft';
 
 const requestDeletion = (db, userId, now) => requestDeletionRaw(db, userId, now, 'admin@example.com');
 
@@ -536,6 +537,8 @@ it('does not write an outgoing attachment while its object is reserved', async (
   await attService.saveSendAtt({env}, [attachment()], 1, 1, 1);
   expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE key = ?').bind(key).first()).n).toBe(1);
   expect(await env.kv.get(key)).toBe('abc');
+  expect(await env.db.prepare('SELECT storage_type,store_id,state FROM attachment_object_origin WHERE object_key=?').bind(key).first())
+    .toMatchObject({storage_type:'KV',store_id:env.attachment_kv_store_id,state:'known'});
 });
 
 it('does not write an incoming attachment while its object is reserved', async () => {
@@ -549,6 +552,78 @@ it('does not write an incoming attachment while its object is reserved', async (
   await attService.addAtt({env}, [record()]);
   expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE key = ?').bind(key).first()).n).toBe(1);
   expect(await env.kv.get(key)).toBe('abc');
+  expect(await env.db.prepare('SELECT storage_type,store_id,state FROM attachment_object_origin WHERE object_key=?').bind(key).first())
+    .toMatchObject({storage_type:'KV',store_id:env.attachment_kv_store_id,state:'known'});
+});
+
+it('keeps the storage origin ambiguous when a preexisting attachment has no trusted origin', async () => {
+  const key='attachments/legacy-unverified.txt';
+  await env.db.prepare('INSERT INTO attachments (user_id,email_id,account_id,key) VALUES (?,?,?,?)').bind(2,2,2,key).run();
+  await attService.addAtt({env}, [{key,userId:1,accountId:1,emailId:1,filename:'file.txt',mimeType:'text/plain',content:new TextEncoder().encode('abc')}]);
+  expect((await env.db.prepare('SELECT state FROM attachment_object_origin WHERE object_key=?').bind(key).first()).state).toBe('ambiguous');
+  expect(await env.kv.get(key)).toBe('abc');
+});
+
+it('does not guess an origin for a previously queued legacy key', async () => {
+  const key='attachments/legacy-queued.txt';
+  await env.db.prepare("INSERT INTO account_deletion_object_queue(user_id,storage_type,object_key) VALUES (0,'UNRESOLVED',?)").bind(key).run();
+  await attService.addAtt({env}, [{key,userId:1,accountId:1,emailId:1,filename:'file.txt',mimeType:'text/plain',content:new TextEncoder().encode('abc')}]);
+  expect((await env.db.prepare('SELECT state FROM attachment_object_origin WHERE object_key=?').bind(key).first()).state).toBe('ambiguous');
+});
+
+it('fails before writing when the isolated test store identity is missing', async () => {
+  const key='attachments/missing-test-store-id.txt';
+  const testEnv={...env,attachment_kv_store_id:''};
+  await expect(attService.addAtt({env:testEnv},[{key,userId:1,accountId:1,emailId:1,filename:'file.txt',mimeType:'text/plain',content:new TextEncoder().encode('abc')}])).rejects.toThrow('Test KV identity missing');
+  expect(await env.kv.get(key)).toBeNull();
+  expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE key=?').bind(key).first()).n).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM attachment_object_origin WHERE object_key=?').bind(key).first()).n).toBe(0);
+});
+
+it('retains a written object for investigation if attachment metadata insertion fails', async () => {
+  const key='attachments/' + await fileUtils.getBuffHash(new TextEncoder().encode('abc')) + '.txt';
+  await env.db.prepare("CREATE TRIGGER fail_attachment_insert BEFORE INSERT ON attachments BEGIN SELECT RAISE(ABORT, 'simulated metadata failure'); END").run();
+  try {
+    await expect(attService.saveSendAtt({env},[{filename:'file.txt',type:'text/plain',content:'YWJj'}],1,1,1)).rejects.toThrow();
+    expect(await env.kv.get(key)).toBe('abc');
+    expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE key=?').bind(key).first()).n).toBe(0);
+    expect((await env.db.prepare("SELECT count(*) AS n FROM account_deletion_object_queue WHERE object_key=? AND storage_type='UNRESOLVED'").bind(key).first()).n).toBe(1);
+    expect((await env.db.prepare('SELECT count(*) AS n FROM attachment_object_lock WHERE object_key=?').bind(key).first()).n).toBe(0);
+  } finally {
+    await env.db.prepare('DROP TRIGGER fail_attachment_insert').run();
+  }
+});
+
+it('records origins for embedded attachments but never guesses for reference-only images', async () => {
+  const key='attachments/new-inline.png', referenced='attachments/legacy-inline.png';
+  await env.db.prepare('INSERT INTO attachments (user_id,email_id,account_id,key) VALUES (?,?,?,?)').bind(2,2,2,referenced).run();
+  await attService.saveArticleAtt({env},[
+    {key,buff:new TextEncoder().encode('image'),filename:'image.png',mimeType:'image/png'},
+    {key:referenced,filename:'old.png',mimeType:'image/png'}
+  ],1,1,1);
+  expect((await env.db.prepare('SELECT state FROM attachment_object_origin WHERE object_key=?').bind(key).first()).state).toBe('known');
+  expect(await env.db.prepare('SELECT state FROM attachment_object_origin WHERE object_key=?').bind(referenced).first()).toBeNull();
+});
+
+it('keeps a new shared KV attachment until its final reference is removed', async () => {
+  const key='attachments/new-shared-flow.txt';
+  const record=(userId,emailId)=>({key,userId,accountId:userId,emailId,filename:'file.txt',mimeType:'text/plain',content:new TextEncoder().encode('same')});
+  await attService.addAtt({env},[record(1,101)]);
+  await attService.addAtt({env},[record(2,202)]);
+  expect((await env.db.prepare('SELECT state FROM attachment_object_origin WHERE object_key=?').bind(key).first()).state).toBe('known');
+  await attService.removeByEmailIds({env},[101]);
+  expect((await env.db.prepare('SELECT storage_type FROM account_deletion_object_queue WHERE user_id=0 AND object_key=?').bind(key).first()).storage_type).toBe('KV');
+  const item={userId:0,storageType:'KV',key};
+  expect(await processTestKvAttachment({env},item,'shared-first',100)).toBe('shared');
+  expect(await env.kv.get(key)).toBe('same');
+  await attService.removeByEmailIds({env},[202]);
+  const wrongEnv={...env,attachment_kv_store_id:'kv:00000000000000000000000000000002'};
+  expect(await processTestKvAttachment({env:wrongEnv},item,'wrong-store',101)).toBe('unresolved');
+  expect(await env.kv.get(key)).toBe('same');
+  expect(await processTestKvAttachment({env},item,'shared-last',102)).toBe('deleted');
+  expect(await env.kv.get(key)).toBeNull();
+  await expect(processTestKvAttachment({env:{...env,attachment_origin_test_only:'disabled'}},item,'disabled',103))
+    .rejects.toThrow('Isolated KV cleanup is not configured');
 });
 
 it('rejects incoming mail and retains failure details if its attachment cannot be saved', async () => {

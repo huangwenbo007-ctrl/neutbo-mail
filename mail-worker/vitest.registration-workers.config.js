@@ -17,6 +17,8 @@ export default defineWorkersConfig({
             jwt_secret: 'local-integration-tests-only',
             orm_log: false,
             account_deletion_test_only: 'enabled',
+            attachment_origin_test_only: 'enabled',
+            attachment_kv_store_id: 'kv:00000000000000000000000000000001',
             google_reauth_redirect_uri: 'https://local.test/login',
           },
         },

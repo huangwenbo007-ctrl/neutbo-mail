@@ -9,12 +9,13 @@ import { parseHTML } from 'linkedom';
 import { v4 as uuidv4 } from 'uuid';
 import domainUtils from '../utils/domain-uitls';
 import settingService from "./setting-service";
-import { withObjectLocks } from './account-deletion-state';
+import kvObjService from './kv-obj-service';
+import { withObjectLocks, recordConfirmedObjectOrigin } from './account-deletion-state';
 
 const attService = {
 
 	async addAtt(c, attachments) {
-		return this.withAttachmentLocks(c, attachments.map(item => item.key), async () => {
+		return this.withAttachmentWriteSafety(c, attachments.map(item => item.key), async (reservation) => {
 			for (let attachment of attachments) {
 				let metadate = {
 					contentType: attachment.mimeType,
@@ -25,7 +26,7 @@ const attService = {
 					metadate.contentDisposition = `inline;filename=${attachment.filename}`
 					metadate.cacheControl = `max-age=259200`
 				}
-				await r2Service.putObj(c, attachment.key, attachment.content, metadate);
+				await this.putAttachment(c, reservation, attachment.key, attachment.content, metadate);
 			}
 
 			await orm(c).insert(att).values(attachments).run();
@@ -34,7 +35,45 @@ const attService = {
 
 	async withAttachmentLocks(c, keys, action) {
 		const storageType = await r2Service.storageType(c);
-		return withObjectLocks(c.env.db, storageType, keys, crypto.randomUUID(), Math.floor(Date.now() / 1000), action);
+		const owner = crypto.randomUUID();
+		return withObjectLocks(c.env.db, storageType, keys, owner, Math.floor(Date.now() / 1000),
+			() => action({owner, storageType}));
+	},
+
+	async withAttachmentWriteSafety(c, keys, action) {
+		return this.withAttachmentLocks(c, keys, async reservation => {
+			try {
+				return await action(reservation);
+			} catch (error) {
+				// A storage write may have succeeded before a later write or database
+				// insert failed. Keep candidate keys for investigation; never guess
+				// their backend or delete them from the failure path.
+				try {
+					const attempted = [...new Set(keys)].filter(key => typeof key === 'string' && key.startsWith('attachments/'));
+					if (attempted.length) await c.env.db.batch(attempted.map(key => c.env.db.prepare(`INSERT OR IGNORE INTO
+						account_deletion_object_queue(user_id,storage_type,object_key) VALUES (0,'UNRESOLVED',?)`).bind(key)));
+				} catch {
+					// If D1 is unavailable the original failure still reaches the caller.
+					// Release requires monitoring and orphan reconciliation.
+					console.error('Attachment failure candidates could not be recorded');
+				}
+				throw error;
+			}
+		});
+	},
+
+	async putAttachment(c, reservation, key, content, metadata) {
+		// Only the isolated preview/test setup provides the verified binding ID.
+		// KV is pinned to the actual binding used, rather than resolving a mutable
+		// storage setting again after the object reservation was acquired.
+		if (c.env.attachment_origin_test_only === 'enabled' && reservation.storageType === 'KV') {
+			const storeId = c.env.attachment_kv_store_id;
+			if (typeof storeId !== 'string' || !/^kv:[a-f0-9]{32}$/.test(storeId) || !c.env.kv) throw new Error('Test KV identity missing');
+			await kvObjService.putObj(c, key, content, metadata);
+			await recordConfirmedObjectOrigin(c.env.db, key, 'KV', storeId, reservation.owner);
+			return;
+		}
+		await r2Service.putObj(c, key, content, metadata);
 	},
 
 	list(c, params, userId) {
@@ -165,21 +204,20 @@ const attService = {
 			attDataList.push(attData);
 		}
 
-		return this.withAttachmentLocks(c, attDataList.map(item => item.key), async () => {
-			await orm(c).insert(att).values(attDataList).run();
-
+		return this.withAttachmentWriteSafety(c, attDataList.map(item => item.key), async (reservation) => {
 			for (let att of attList) {
-				await r2Service.putObj(c, att.key, att.buff, {
+				await this.putAttachment(c, reservation, att.key, att.buff, {
 					contentType: att.type,
 					contentDisposition: `attachment;filename=${att.filename}`
 				});
 			}
+			await orm(c).insert(att).values(attDataList).run();
 		});
 
 	},
 
 	async saveArticleAtt(c, attDataList, userId, accountId, emailId) {
-		return this.withAttachmentLocks(c, attDataList.map(item => item.key), async () => {
+		return this.withAttachmentWriteSafety(c, attDataList.map(item => item.key), async (reservation) => {
 			for (let attData of attDataList) {
 				attData.userId = userId;
 				attData.emailId = emailId;
@@ -188,7 +226,7 @@ const attService = {
 				if (!attData.buff) {
 					continue;
 				}
-				await r2Service.putObj(c, attData.key, attData.buff, {
+				await this.putAttachment(c, reservation, attData.key, attData.buff, {
 					contentType: attData.mimeType,
 					cacheControl: `max-age=259200`,
 					contentDisposition: `inline;filename=${attData.filename}`
@@ -223,12 +261,14 @@ const attService = {
 		if (!Array.isArray(fieldValues) || fieldValues.length === 0) return;
 		const statements = [];
 		for (const value of new Set(fieldValues)) {
-			// Old objects do not record their storage origin. Queue them as
-			// unresolved rather than deleting a shared file or guessing a bucket.
+			// Only a trusted, unambiguous origin may identify the storage type;
+			// legacy and conflicting origins remain unresolved.
 			// The queue and reference removal are committed together.
 			statements.push(c.env.db.prepare(`INSERT OR IGNORE INTO account_deletion_object_queue
 				(user_id, storage_type, object_key)
-				SELECT 0, 'UNRESOLVED', key FROM attachments WHERE ${fieldName} = ?`).bind(value));
+				SELECT 0, CASE WHEN origin.state='known' THEN origin.storage_type ELSE 'UNRESOLVED' END, a.key
+				FROM attachments a LEFT JOIN attachment_object_origin origin ON origin.object_key=a.key
+				WHERE a.${fieldName} = ?`).bind(value));
 			statements.push(c.env.db.prepare(`DELETE FROM attachments WHERE ${fieldName} = ?`).bind(value));
 		}
 		await c.env.db.batch(statements);

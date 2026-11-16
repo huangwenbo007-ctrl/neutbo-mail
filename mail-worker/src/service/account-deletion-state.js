@@ -59,7 +59,9 @@ export async function stagePurge(db, userId) {
 		const stillPurging = "EXISTS (SELECT 1 FROM account_deletion_request WHERE user_id = ? AND state = 'purging') AND NOT EXISTS (SELECT 1 FROM user WHERE user_id = ? AND is_del IS NOT 1)";
 		await db.batch([
 			db.prepare(`INSERT OR IGNORE INTO account_deletion_object_queue (user_id, storage_type, object_key)
-				SELECT DISTINCT ?, 'UNRESOLVED', key FROM attachments WHERE user_id = ? AND ${stillPurging}`)
+				SELECT DISTINCT ?, CASE WHEN origin.state='known' THEN origin.storage_type ELSE 'UNRESOLVED' END, a.key
+				FROM attachments a LEFT JOIN attachment_object_origin origin ON origin.object_key=a.key
+				WHERE a.user_id = ? AND ${stillPurging}`)
 				.bind(userId, userId, userId, userId),
 			db.prepare(`INSERT OR IGNORE INTO account_deletion_object_queue (user_id, storage_type, object_key)
 				SELECT DISTINCT ?, 'UNRESOLVED', f.object_key FROM inbound_attachment_failure f
@@ -133,7 +135,8 @@ export async function withAccountLocks(db, userIds, operation) {
 
 // Prototype only. Call while holding the object reservation, after a trusted
 // writer confirms the actual storage identity. Never infer an origin from the
-// current setting or from a client-supplied value. This is not wired to writers.
+// current setting or from a client-supplied value. Test-only KV wiring exists;
+// other writers and storage identities still require integration and review.
 export async function recordConfirmedObjectOrigin(db, key, storageType, storeId, owner) {
 	if (typeof key !== 'string' || !key.startsWith('attachments/') ||
 		!['KV', 'R2', 'S3'].includes(storageType) || typeof storeId !== 'string' || !storeId.trim() ||
@@ -141,11 +144,14 @@ export async function recordConfirmedObjectOrigin(db, key, storageType, storeId,
 		throw new Error('Invalid confirmed object origin');
 	}
 	const row = await db.prepare(`INSERT INTO attachment_object_origin(object_key,storage_type,store_id,state)
-		SELECT ?,?,?,'known' WHERE EXISTS (SELECT 1 FROM attachment_object_lock WHERE object_key=? AND owner_token=? AND storage_type=?)
+		SELECT ?,?,?,CASE WHEN NOT EXISTS (SELECT 1 FROM attachment_object_origin WHERE object_key=?) AND
+			(EXISTS (SELECT 1 FROM attachments WHERE key=?) OR EXISTS (SELECT 1 FROM account_deletion_object_queue
+				WHERE object_key=? AND storage_type='UNRESOLVED')) THEN 'ambiguous' ELSE 'known' END
+		WHERE EXISTS (SELECT 1 FROM attachment_object_lock WHERE object_key=? AND owner_token=? AND storage_type=?)
 		ON CONFLICT(object_key) DO UPDATE SET state=CASE
 			WHEN attachment_object_origin.state='known' AND attachment_object_origin.storage_type=excluded.storage_type
 			AND attachment_object_origin.store_id=excluded.store_id THEN 'known' ELSE 'ambiguous' END RETURNING state`)
-		.bind(key,storageType,storeId,key,owner,storageType).first();
+		.bind(key,storageType,storeId,key,key,key,key,owner,storageType).first();
 	if (!row) throw new Error('Object reservation required');
 	return row.state;
 }
