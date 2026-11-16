@@ -87,7 +87,7 @@
         <p>{{ $t('deletionEmailHelp') }}</p>
         <el-button :loading="deleteLoading" @click="sendDeletionEmail">{{ $t('deletionSendEmail') }}</el-button>
         <p v-if="deleteEmailMask">{{ $t('deletionEmailSent', {email: deleteEmailMask}) }}</p>
-        <el-input v-model="deleteEmailCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code"
+        <el-input :model-value="deleteEmailCode" @update:model-value="updateDeletionCode" inputmode="numeric" autocomplete="one-time-code"
           :placeholder="$t('deletionEmailCode')" />
       </template>
       <template #footer>
@@ -196,6 +196,11 @@ const deletePassword = ref('')
 const deleteLoading = ref(false)
 const deleteEmailCode = ref('')
 const deleteEmailMask = ref('')
+
+function updateDeletionCode(value) {
+  // Pasting a code with surrounding whitespace must not truncate a digit.
+  deleteEmailCode.value = String(value).replace(/\D/g, '').slice(0, 6)
+}
 
 function clearDeletionForm() {
   deletePassword.value = ''
