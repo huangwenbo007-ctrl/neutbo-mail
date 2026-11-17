@@ -17,6 +17,7 @@ import { commitGoogleDeletion } from '../src/service/google-deletion-draft';
 import { acquireObjectLock, releaseObjectLock } from '../src/service/account-deletion-state';
 import { processTestKvAttachment } from '../src/service/attachment-cleanup-draft';
 import cryptoUtils from '../src/utils/crypto-utils';
+import { stageDueDeletionsForTest } from '../src/service/account-deletion-runner-draft';
 
 const requestDeletion = (db, userId, now) => requestDeletionRaw(db, userId, now, 'admin@example.com');
 
@@ -481,6 +482,48 @@ it('keeps a shared attachment through another account’s full deletion lifecycl
   expect(await env.kv.get(shared)).toBe('shared');
   expect(await env.kv.get(own)).toBeNull();
   expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE key=? AND user_id=?').bind(shared,other.user_id).first()).n).toBe(1);
+});
+
+it('stages only due deletions in isolated batches and retries purging accounts', async () => {
+  for (const name of ['due-batch','due-second','later-batch']) {
+    const verified=await proof(`${name}@external.test`);
+    expect((await post('/register',{email:`${name}@example.com`,password:'test-password',...verified})).code).toBe(200);
+  }
+  const getUser = async name => env.db.prepare('SELECT user_id FROM user WHERE email=?').bind(`${name}@example.com`).first();
+  const due=await getUser('due-batch'), second=await getUser('due-second'), later=await getUser('later-batch');
+  const now=4000000;
+  expect(await requestDeletion(env.db,due.user_id,now-30*86400)).toBe(true);
+  expect(await requestDeletion(env.db,second.user_id,now-30*86400)).toBe(true);
+  expect(await requestDeletion(env.db,later.user_id,now-30*86400+1)).toBe(true);
+  await expect(stageDueDeletionsForTest({...env,account_deletion_test_only:'disabled'},now)).rejects.toThrow('restricted');
+  const lock=`internal/account/${due.user_id}`;
+  expect(await acquireObjectLock(env.db,'KV',lock,'busy-owner',now)).toBe(true);
+  expect(await stageDueDeletionsForTest(env,now,1)).toEqual({staged:0,skipped:0,failed:1,nextCursor:due.user_id});
+  expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(due.user_id).first()).n).toBe(1);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(later.user_id).first()).n).toBe(1);
+  // A completed or stuck earlier request cannot starve later pages.
+  expect(await stageDueDeletionsForTest(env,now,1,due.user_id)).toEqual({staged:1,skipped:0,failed:0,nextCursor:second.user_id});
+  expect(await stageDueDeletionsForTest(env,now,1,second.user_id)).toEqual({staged:0,skipped:0,failed:0,nextCursor:null});
+  expect(await releaseObjectLock(env.db,'KV',lock,'busy-owner')).toBe(true);
+  // Restarting a pass safely retries the request which encountered contention.
+  expect(await stageDueDeletionsForTest(env,now,1)).toEqual({staged:1,skipped:0,failed:0,nextCursor:due.user_id});
+  expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(due.user_id).first()).n).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(later.user_id).first()).n).toBe(1);
+});
+
+it('does not stage a reactivated account when retrying a purging request', async () => {
+  const verified=await proof('batch-reactivated@external.test');
+  expect((await post('/register',{email:'batch-reactivated@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='batch-reactivated@example.com'").first();
+  const now=4000000;
+  expect(await requestDeletion(env.db,user.user_id,now-30*86400)).toBe(true);
+  expect(await claimDeletion(env.db,user.user_id,now)).toBe(true);
+  await env.db.prepare('UPDATE user SET is_del=0 WHERE user_id=?').bind(user.user_id).run();
+  expect(await stageDueDeletionsForTest(env,now)).toEqual({staged:0,skipped:1,failed:0,nextCursor:null});
+  expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(user.user_id).first()).n).toBe(1);
+  expect((await env.db.prepare('SELECT state FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first()).state).toBe('purging');
+  await expect(stageDueDeletionsForTest(env,now,0)).rejects.toThrow('Invalid deletion batch');
+  await expect(stageDueDeletionsForTest(env,now,1,-1)).rejects.toThrow('Invalid deletion batch');
 });
 
 it('preserves shared attachments and retries failed cleanup in Workers bindings', async () => {
