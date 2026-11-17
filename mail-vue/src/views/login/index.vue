@@ -127,6 +127,10 @@
           <div class="switch" @click="show = 'login'" v-else>{{ $t('hasAccount') }} <span>{{ $t('loginSwitch') }}</span>
           </div>
         </template>
+        <div class="public-info-links">
+          <a href="/about.html">关于 Neutbo Mail</a>
+          <a href="/privacy.html">隐私政策</a>
+        </div>
       </div>
     </div>
     <el-dialog class="bind-dialog" v-model="showBindForm" title="注册邮箱" @closed="resetBindTurnstile">
@@ -787,6 +791,9 @@ html.dark .intro-brand img, html.dark .form-brand img { filter: brightness(0) in
 </style>
 
 <style lang="scss" scoped>
+.public-info-links { display: flex; justify-content: center; gap: 20px; margin-top: 24px; font-size: 13px; }
+.public-info-links a { color: #6b7b90; text-decoration: none; }
+.public-info-links a:hover { color: #2469c5; }
 
 .form-wrapper {
   position: fixed;
