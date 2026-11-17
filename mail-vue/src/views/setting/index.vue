@@ -31,6 +31,10 @@
           <el-button type="primary" @click="pwdShow = true">{{$t('changePwdBtn')}}</el-button>
         </div>
       </div>
+      <div v-if="deletionDraftEnabled" class="item setting-row">
+        <div>恢复邮箱</div>
+        <el-button @click="recoveryContactVisible = true">设置或更改</el-button>
+      </div>
     </div>
     <div class="language">
       <div class="title">{{$t('language')}}</div>
@@ -63,18 +67,40 @@
     <div class="del-email" v-perm="'my:delete'">
       <div class="title">{{$t('deleteUser')}}</div>
       <div style="color: var(--regular-text-color);">
-        {{$t('delAccountMsg')}}
+        {{ deletionDraftEnabled ? $t('deletionGraceInfo') : $t('deletionUnavailable') }}
       </div>
       <div>
-        <el-button type="primary" @click="deleteConfirm">{{$t('deleteUserBtn')}}</el-button>
+        <el-button type="danger" :disabled="!deletionDraftEnabled" @click="deleteDialogVisible = true">{{$t('deleteUserBtn')}}</el-button>
       </div>
     </div>
-    <el-dialog v-model="pwdShow" :title="$t('changePassword')" width="340">
+    <RecoveryContactDialog v-if="deletionDraftEnabled" v-model="recoveryContactVisible" />
+    <el-dialog v-model="pwdShow" :title="$t('changePassword')" width="340" @closed="clearPasswordForm">
       <div class="update-pwd">
+        <p>{{ $t('passwordChangeHelp') }}</p>
+        <el-input type="password" :placeholder="$t('currentPassword')" v-model="form.oldPassword" autocomplete="current-password" @keyup.enter="submitPwd"/>
         <el-input type="password" :placeholder="$t('newPassword')" v-model="form.password" autocomplete="off" @keyup.enter="submitPwd"/>
         <el-input type="password" :placeholder="$t('confirmPassword')" v-model="form.newPwd" autocomplete="off" @keyup.enter="submitPwd"/>
         <el-button type="primary" :loading="setPwdLoading" @click="submitPwd">{{$t('save')}}</el-button>
       </div>
+    </el-dialog>
+    <el-dialog v-model="deleteDialogVisible" :title="$t('deleteUser')" width="min(420px, 90vw)" @closed="clearDeletionForm">
+      <p>{{ $t('deletionGraceInfo') }}</p>
+      <p>请先设置可用的恢复邮箱，或确认已绑定 Google 邮箱，以便在恢复期内验证身份。</p>
+      <p>{{ $t('deletionCurrentPassword') }}</p>
+      <el-input v-model="deletePassword" type="password" show-password autocomplete="current-password"
+        :placeholder="$t('deletionCurrentPassword')" @keyup.enter="submitDeletion" />
+      <template v-if="userStore.user.googleLinked">
+        <p>{{ $t('deletionEmailHelp') }}</p>
+        <el-button :loading="deleteLoading" @click="sendDeletionEmail">{{ $t('deletionSendEmail') }}</el-button>
+        <p v-if="deleteEmailMask">{{ $t('deletionEmailSent', {email: deleteEmailMask}) }}</p>
+        <el-input :model-value="deleteEmailCode" @update:model-value="updateDeletionCode" inputmode="numeric" autocomplete="one-time-code"
+          :placeholder="$t('deletionEmailCode')" />
+      </template>
+      <template #footer>
+        <el-button @click="deleteDialogVisible = false">{{ $t('cancel') }}</el-button>
+        <el-button v-if="userStore.user.googleLinked" :loading="deleteLoading" @click="submitGoogleEmailDeletion">{{ $t('deletionEmailSubmit') }}</el-button>
+        <el-button type="danger" :loading="deleteLoading" @click="submitDeletion">{{ $t('deletionSubmit') }}</el-button>
+      </template>
     </el-dialog>
   </div>
     </el-scrollbar>
@@ -82,7 +108,7 @@
 </template>
 <script setup>
 import {reactive, ref, defineOptions} from 'vue'
-import {resetPassword, userDelete} from "@/request/my.js";
+import {resetPassword, requestDeletion, sendGoogleDeletionEmail, completeGoogleEmailDeletion} from "@/request/my.js";
 import {useUserStore} from "@/store/user.js";
 import router from "@/router/index.js";
 import {accountSetName} from "@/request/account.js";
@@ -91,6 +117,7 @@ import {useI18n} from "vue-i18n";
 import {useSettingStore} from "@/store/setting.js";
 import {useUiStore} from "@/store/ui.js";
 import ThemeSelector from "@/components/theme-selector/index.vue";
+import RecoveryContactDialog from '@/components/recovery/RecoveryContactDialog.vue';
 
 const { t } = useI18n()
 const accountStore = useAccountStore()
@@ -98,6 +125,7 @@ const settingStore = useSettingStore()
 const uiStore = useUiStore()
 const userStore = useUserStore();
 const setPwdLoading = ref(false)
+const recoveryContactVisible = ref(false)
 const setNameShow = ref(false)
 const accountName = ref(null)
 const langSelect = ref(settingStore.lang)
@@ -158,32 +186,95 @@ function changeLang(lang) {
 
 const pwdShow = ref(false)
 const form = reactive({
+  oldPassword: '',
   password: '',
   newPwd: '',
 })
 
-const deleteConfirm = () => {
-  ElMessageBox.confirm(t('delAccountConfirm'), {
-    confirmButtonText: t('confirm'),
-    cancelButtonText: t('cancel'),
-    type: 'warning'
-  }).then(() => {
-    userDelete().then(() => {
-      localStorage.removeItem('token');
-      router.replace('/login');
-      ElMessage({
-        message: t('delSuccessMsg'),
-        type: 'success',
-        plain: true,
-      })
-    })
-  })
+function clearPasswordForm() {
+  form.oldPassword = ''
+  form.password = ''
+  form.newPwd = ''
 }
 
+// This build-time switch is for disposable environments only.
+const deletionDraftEnabled = import.meta.env.VITE_ACCOUNT_DELETION_TEST_ONLY === 'enabled'
+const deleteDialogVisible = ref(false)
+const deletePassword = ref('')
+const deleteLoading = ref(false)
+const deleteEmailCode = ref('')
+const deleteEmailMask = ref('')
+
+function updateDeletionCode(value) {
+  // Pasting a code with surrounding whitespace must not truncate a digit.
+  deleteEmailCode.value = String(value).replace(/\D/g, '').slice(0, 6)
+}
+
+function clearDeletionForm() {
+  deletePassword.value = ''
+  deleteEmailCode.value = ''
+  deleteEmailMask.value = ''
+}
+
+async function submitDeletion() {
+  if (deleteLoading.value || !deletionDraftEnabled) return
+  if (!deletePassword.value) {
+    ElMessage.error(t('deletionCurrentPassword'))
+    return
+  }
+  deleteLoading.value = true
+  try {
+    await requestDeletion(deletePassword.value)
+    deletePassword.value = ''
+    deleteDialogVisible.value = false
+    localStorage.removeItem('token')
+    await router.replace('/login')
+    ElMessage.success(t('deletionRequested'))
+  } catch (_) {
+    // The request interceptor reports the error; do not treat it as success.
+  } finally {
+    deleteLoading.value = false
+  }
+}
+
+async function sendDeletionEmail() {
+  if (deleteLoading.value || !deletionDraftEnabled) return
+  deleteLoading.value = true
+  try {
+    const data = await sendGoogleDeletionEmail()
+    deleteEmailMask.value = data.maskedEmail
+  } catch (_) {
+    // The request interceptor reports errors.
+  } finally {
+    deleteLoading.value = false
+  }
+}
+
+async function submitGoogleEmailDeletion() {
+  if (deleteLoading.value || !deletionDraftEnabled) return
+  if (!/^\d{6}$/.test(deleteEmailCode.value)) return ElMessage.error(t('deletionEmailCode'))
+  deleteLoading.value = true
+  try {
+    await completeGoogleEmailDeletion(deleteEmailCode.value)
+    deleteDialogVisible.value = false
+    localStorage.removeItem('token')
+    await router.replace('/login')
+    ElMessage.success(t('deletionRequested'))
+  } catch (_) {
+    // The request interceptor reports errors.
+  } finally {
+    deleteLoading.value = false
+  }
+}
 
 function submitPwd() {
 
   if (setPwdLoading.value) return
+
+  if (!form.oldPassword) {
+    ElMessage.error(t('currentPassword'))
+    return
+  }
 
   if (!form.password) {
     ElMessage({
@@ -213,16 +304,17 @@ function submitPwd() {
   }
 
   setPwdLoading.value = true
-  resetPassword(form.password).then(() => {
+  resetPassword(form.oldPassword, form.password).then(async () => {
     ElMessage({
-      message: t('saveSuccessMsg'),
+      message: t('passwordChangedLoginAgain'),
       type: 'success',
       plain: true,
     })
     pwdShow.value = false
     setPwdLoading.value = false
-    form.password = ''
-    form.newPwd = ''
+    clearPasswordForm()
+    localStorage.removeItem('token')
+    await router.replace('/login')
   }).catch(() => {
     setPwdLoading.value = false
   })

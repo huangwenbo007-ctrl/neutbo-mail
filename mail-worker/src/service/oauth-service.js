@@ -7,6 +7,7 @@ import loginService from "./login-service";
 import settingService from "./setting-service";
 import {t} from '../i18n/i18n';
 import {sign, verify} from 'hono/jwt';
+import verifyUtils from '../utils/verify-utils';
 
 const oauthService = {
 
@@ -182,6 +183,18 @@ const oauthService = {
 	async saveAndLogin(c, userInfo) {
 
 		const oauthRow = await this.saveUser(c, userInfo);
+		// Only Google userinfo reached through the server-side token exchange is
+		// accepted. Existing oauth.username values have no verified-email flag.
+		if (userInfo.platform === 'google' && c.env.account_deletion_test_only === 'enabled') {
+			const email = typeof userInfo.email === 'string' ? userInfo.email.trim().toLowerCase() : '';
+			if (userInfo.email_verified === true && email.length <= 254 && !/[\r\n]/.test(email) && verifyUtils.isEmail(email)) {
+				await c.env.db.prepare(`INSERT INTO google_verified_contact(oauth_id, subject, email) VALUES (?, ?, ?)
+					ON CONFLICT(oauth_id) DO UPDATE SET subject=excluded.subject, email=excluded.email`)
+					.bind(oauthRow.oauthId, userInfo.oauthUserId, email).run();
+			} else {
+				await c.env.db.prepare('DELETE FROM google_verified_contact WHERE oauth_id=?').bind(oauthRow.oauthId).run();
+			}
+		}
 		if (oauthRow.userId === -1) throw new BizError('第三方账号正在处理中，请稍后重试');
 		const userRow = await userService.selectByIdIncludeDel(c, oauthRow.userId);
 
@@ -220,11 +233,20 @@ const oauthService = {
 	},
 
 	async deleteByUserIds(c, userIds) {
+		if (c.env.account_deletion_test_only === 'enabled' && userIds.length) {
+			// Remove verified contacts before the corresponding OAuth rows.
+			const placeholders = userIds.map(() => '?').join(',');
+			await c.env.db.prepare(`DELETE FROM google_verified_contact WHERE oauth_id IN
+				(SELECT oauth_id FROM oauth WHERE user_id IN (${placeholders}))`).bind(...userIds).run();
+		}
 		await orm(c).delete(oauth).where(inArray(oauth.userId, userIds)).run();
 	},
 
 	//定时任务凌晨清除未绑定邮箱的oauth用户
 	async clearNoBindOathUser(c) {
+		if (c.env.account_deletion_test_only === 'enabled') {
+			await c.env.db.prepare('DELETE FROM google_verified_contact WHERE oauth_id IN (SELECT oauth_id FROM oauth WHERE user_id=0)').run();
+		}
 		await orm(c).delete(oauth).where(eq(oauth.userId, 0)).run();
 	},
 

@@ -40,6 +40,80 @@ const dbInit = {
 		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS registration_email_rate (
 			ip_hash TEXT PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL
 		)`).run();
+		// Draft schema used by isolated tests. Existing deployments require an explicit migration.
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_session_generation (
+			user_id INTEGER PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0)
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_reauth_rate (
+			user_id INTEGER PRIMARY KEY, window_start INTEGER NOT NULL,
+			attempts INTEGER NOT NULL CHECK (attempts BETWEEN 1 AND 5)
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS google_deletion_challenge (
+			user_id INTEGER PRIMARY KEY, state TEXT NOT NULL UNIQUE, session_hash TEXT NOT NULL,
+			nonce TEXT NOT NULL, verifier TEXT NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS google_verified_contact (
+			oauth_id INTEGER PRIMARY KEY, subject TEXT NOT NULL, email TEXT NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS google_email_deletion_code (
+			user_id INTEGER PRIMARY KEY, oauth_id INTEGER NOT NULL, subject TEXT NOT NULL, email TEXT NOT NULL,
+			session_hash TEXT NOT NULL, challenge TEXT NOT NULL, code_hash TEXT NOT NULL,
+			sent_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+			consumed INTEGER NOT NULL DEFAULT 0
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS google_email_deletion_rate (
+			user_id INTEGER PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_email_code (
+			user_id INTEGER PRIMARY KEY, oauth_id INTEGER NOT NULL, subject TEXT NOT NULL,
+			email TEXT NOT NULL, generation INTEGER NOT NULL, challenge TEXT NOT NULL,
+			code_hash TEXT NOT NULL, sent_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0, verified_until INTEGER NOT NULL DEFAULT 0, reference_hash TEXT NOT NULL DEFAULT '',
+			consumed INTEGER NOT NULL DEFAULT 0
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_email_rate (
+			rate_key TEXT PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_email_slot (
+			email_hash TEXT PRIMARY KEY, challenge TEXT NOT NULL, issued_at INTEGER NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_support_ticket (
+			user_id INTEGER PRIMARY KEY, generation INTEGER NOT NULL, reference_hash TEXT NOT NULL,
+			created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_support_audit (
+			audit_id INTEGER PRIMARY KEY AUTOINCREMENT, actor_user_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+			target_hash TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('ticket_create','approve')),
+			created_at INTEGER NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_contact (
+			user_id INTEGER PRIMARY KEY, email TEXT NOT NULL, version INTEGER NOT NULL, verified_at INTEGER NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_contact_code (
+			user_id INTEGER PRIMARY KEY, email TEXT NOT NULL, challenge TEXT NOT NULL, code_hash TEXT NOT NULL,
+			session_hash TEXT NOT NULL, generation INTEGER NOT NULL, sent_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0, consumed INTEGER NOT NULL DEFAULT 0
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_deletion_request (
+			user_id INTEGER PRIMARY KEY, requested_at INTEGER NOT NULL, purge_after INTEGER NOT NULL,
+			state TEXT NOT NULL CHECK (state IN ('pending', 'purging')),
+			CHECK (purge_after >= requested_at + 2592000)
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_deletion_object_queue (
+			storage_type TEXT NOT NULL, object_key TEXT NOT NULL, user_id INTEGER NOT NULL,
+			PRIMARY KEY(user_id, storage_type, object_key)
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS attachment_object_lock (
+			storage_type TEXT NOT NULL, object_key TEXT PRIMARY KEY, owner_token TEXT NOT NULL, created_at INTEGER NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS attachment_object_origin (
+			object_key TEXT PRIMARY KEY, storage_type TEXT NOT NULL CHECK (storage_type IN ('KV', 'R2', 'S3')),
+			store_id TEXT NOT NULL CHECK (length(store_id) > 0), state TEXT NOT NULL CHECK (state IN ('known', 'ambiguous'))
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS inbound_attachment_failure (
+			email_id INTEGER NOT NULL, object_key TEXT NOT NULL, recorded_at INTEGER NOT NULL,
+			PRIMARY KEY (email_id, object_key)
+		)`).run();
 		await settingService.refresh(c);
 		return c.text('success');
 	},

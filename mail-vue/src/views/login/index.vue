@@ -57,6 +57,7 @@
           <el-button class="btn" type="primary" @click="submit" :loading="loginLoading"
           >{{ $t('loginBtn') }}
           </el-button>
+          <el-button v-if="recoveryPreviewEnabled" text @click="recoveryVisible = true">恢复已删除账号</el-button>
           <el-button v-for="p in oauthProviders" :key="p.key" class="btn" style="margin-top: 10px" @click="oauthLogin(p.key)">
             <el-avatar v-if="p.iconType === 'image'" :src="p.icon" :size="18" style="margin-right: 10px" />
             <Icon v-else :icon="p.icon" width="18" height="18" style="margin-right: 10px" />
@@ -127,8 +128,13 @@
           <div class="switch" @click="show = 'login'" v-else>{{ $t('hasAccount') }} <span>{{ $t('loginSwitch') }}</span>
           </div>
         </template>
+        <div v-if="recoveryPreviewEnabled" class="public-info-links">
+          <RouterLink to="/about">关于 Neutbo Mail</RouterLink>
+          <RouterLink to="/privacy">隐私说明</RouterLink>
+        </div>
       </div>
     </div>
+    <RecoveryDialog v-if="recoveryPreviewEnabled" v-model="recoveryVisible" />
     <el-dialog class="bind-dialog" v-model="showBindForm" title="注册邮箱" @closed="resetBindTurnstile">
       <div class="bind-container">
         <p>已为你建议邮箱地址，可以修改后继续。</p>
@@ -175,6 +181,7 @@
 <script setup>
 import router from "@/router";
 import {computed, nextTick, onUnmounted, reactive, ref} from "vue";
+import RecoveryDialog from '@/components/recovery/RecoveryDialog.vue';
 import {login} from "@/request/login.js";
 import {register} from "@/request/login.js";
 import {sendRegistrationCode} from "@/request/login.js";
@@ -186,7 +193,7 @@ import {useUserStore} from "@/store/user.js";
 import {useUiStore} from "@/store/ui.js";
 import {Icon} from "@iconify/vue";
 import {cvtR2Url} from "@/utils/convert.js";
-import {loginUserInfo} from "@/request/my.js";
+import {loginUserInfo, completeGoogleDeletion} from "@/request/my.js";
 import {permsToRouter} from "@/perm/perm.js";
 import {useI18n} from "vue-i18n";
 import {oauthBindUser, oauthLinuxDoLogin, oauthGithubLogin, oauthGoogleLogin} from "@/request/ouath.js";
@@ -199,6 +206,8 @@ const uiStore = useUiStore();
 const settingStore = useSettingStore();
 const brandLogo = `${import.meta.env.BASE_URL}neutbo-bird-v1.svg`
 const loginLoading = ref(false)
+const recoveryPreviewEnabled = import.meta.env.VITE_ACCOUNT_DELETION_TEST_ONLY === 'enabled'
+const recoveryVisible = ref(false)
 const bindLoading = ref(false)
 const oauthLoading = ref(false);
 const showBindForm = ref(false);
@@ -396,6 +405,28 @@ async function oauthGetUser() {
 
   const params = new URLSearchParams(window.location.search)
   const code = params.get('code')
+  const deletionState = sessionStorage.getItem('googleDeletionState')
+  if (deletionState && params.get('state') === deletionState) {
+    sessionStorage.removeItem('googleDeletionState')
+    window.history.replaceState({}, '', window.location.origin + window.location.pathname)
+    if (!code || params.get('error')) {
+      ElMessage.error(t('deletionGoogleFailed'))
+      await router.replace('/settings')
+      return
+    }
+    oauthLoading.value = true
+    try {
+      await completeGoogleDeletion(code, deletionState)
+      localStorage.removeItem('token')
+      ElMessage.success(t('deletionRequested'))
+    } catch (_) {
+      ElMessage.error(t('deletionGoogleFailed'))
+      await router.replace('/settings')
+    } finally {
+      oauthLoading.value = false
+    }
+    return
+  }
   if (!code) return
 
   const provider = sessionStorage.getItem('oauthProvider')
@@ -787,6 +818,18 @@ html.dark .intro-brand img, html.dark .form-brand img { filter: brightness(0) in
 </style>
 
 <style lang="scss" scoped>
+.public-info-links {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  margin-top: 24px;
+  font-size: 13px;
+}
+.public-info-links a {
+  color: #6b7b90;
+  text-decoration: none;
+}
+.public-info-links a:hover { color: #2469c5; }
 
 .form-wrapper {
   position: fixed;

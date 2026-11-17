@@ -26,6 +26,11 @@ import telegramService from './telegram-service';
 import webhookService from './webhook-service';
 import forwardMime from '../utils/forward-mime';
 import verifyUtils from '../utils/verify-utils';
+import { withAccountLock, withAccountLocks, ReservationBusyError } from './account-deletion-state';
+
+class PendingAccountDeletionError extends BizError {
+	constructor() { super('账号正在等待恢复或清理，无法通过此入口删除邮件'); }
+}
 
 const emailService = {
 
@@ -955,6 +960,15 @@ const emailService = {
 
 			//如果收件人存在就把邮件信息改成收件人的
 			if (accountRow) {
+				const activeRecipient = await userService.selectById(c, accountRow.userId);
+				if (!activeRecipient) {
+					emailValues.userId = accountRow.userId;
+					emailValues.accountId = accountRow.accountId;
+					emailValues.status = emailConst.status.BOUNCED;
+					emailValues.message = `The recipient <${email}> is unavailable.`;
+					emailDataList.push(emailValues);
+					continue;
+				}
 
 				//设置给收件人保存
 				emailValues.userId = accountRow.userId;
@@ -1005,22 +1019,37 @@ const emailService = {
 		const receiveEmailList = emailDataList.filter(emailRow => emailRow.status === emailConst.status.RECEIVE || emailRow.status === emailConst.status.NOONE);
 		const emailRowList = [];
 
-		for (const emailData of receiveEmailList) {
-
-			const emailRow = await orm(c).insert(email).values(emailData).returning().get();
-			emailRowList.push(emailRow);
-
-			//设置附件保存
-			for (const attRow of attList) {
-				const attValues = {...attRow};
-				attValues.emailId = emailRow.emailId;
-				attValues.accountId = emailRow.accountId;
-				attValues.userId = emailRow.userId;
-				attValues.attId = null;
-				await orm(c).insert(att).values(attValues).run();
+		await attService.withAttachmentLocks(c, attList.map(item => item.key), async () => {
+			// The sender's message may have been removed while this delivery waited
+			// for a lock. Never create references to an object already eligible for purge.
+			for (const item of attList) {
+				const source = await c.env.db.prepare('SELECT 1 AS found FROM attachments WHERE att_id = ? AND key = ?')
+					.bind(item.attId, item.key).first();
+				if (!source) throw new BizError('附件已不可用，请重新发送邮件');
 			}
-
-		}
+			for (const emailData of receiveEmailList) {
+				const deliver = async () => {
+					if (emailData.userId && !await userService.selectById(c, emailData.userId)) {
+						emailData.status = emailConst.status.BOUNCED;
+						emailData.message = `The recipient <${emailData.toEmail}> is unavailable.`;
+						return;
+					}
+					const emailRow = await orm(c).insert(email).values(emailData).returning().get();
+					emailRowList.push(emailRow);
+					//设置附件保存
+					for (const attRow of attList) {
+						const attValues = {...attRow};
+						attValues.emailId = emailRow.emailId;
+						attValues.accountId = emailRow.accountId;
+						attValues.userId = emailRow.userId;
+						attValues.attId = null;
+						await orm(c).insert(att).values(attValues).run();
+					}
+				};
+				if (emailData.userId) await withAccountLock(c.env.db, emailData.userId, deliver);
+				else await deliver();
+			}
+		});
 
 		const bouncedEmail = emailDataList.find(emailRow => emailRow.status === emailConst.status.BOUNCED);
 
@@ -1176,9 +1205,18 @@ const emailService = {
 	async physicsDelete(c, params) {
 		let { emailIds } = params;
 		emailIds = emailIds.split(',').map(Number);
-		await attService.removeByEmailIds(c, emailIds);
-		await starService.removeByEmailIds(c, emailIds);
-		await orm(c).delete(email).where(inArray(email.emailId, emailIds)).run();
+		const rows = await orm(c).select({userId:email.userId}).from(email).where(inArray(email.emailId, emailIds)).all();
+		const userIds = [...new Set(rows.map(row => Number(row.userId)).filter(id => Number.isSafeInteger(id) && id > 0))];
+		const remove = async () => {
+			for (const userId of userIds) {
+				const request = await c.env.db.prepare('SELECT 1 AS present FROM account_deletion_request WHERE user_id=?').bind(userId).first();
+				if (request) throw new PendingAccountDeletionError();
+			}
+			await attService.removeByEmailIds(c, emailIds);
+			await starService.removeByEmailIds(c, emailIds);
+			await orm(c).delete(email).where(inArray(email.emailId, emailIds)).run();
+		};
+		return userIds.length ? withAccountLocks(c.env.db, userIds, remove) : remove();
 	},
 
 	async physicsDeleteUserIds(c, userIds) {
@@ -1340,18 +1378,20 @@ const emailService = {
 	},
 
 	async completeReceiveAll(c) {
-		// 用 EXISTS 走 status=6 部分索引 + account 主键；避免 IN (SELECT account_id FROM account) 触发全盘扫描
-		await c.env.db.prepare(
-			`UPDATE email
-			 SET status = ${emailConst.status.RECEIVE}
-			 WHERE status = ${emailConst.status.SAVING}
-			   AND EXISTS (SELECT 1 FROM account WHERE account.account_id = email.account_id)`
-		).run();
-		await c.env.db.prepare(
-			`UPDATE email
-			 SET status = ${emailConst.status.NOONE}
-			 WHERE status = ${emailConst.status.SAVING}`
-		).run();
+		// A SAVING row may still be in flight, or may lack attachments after a
+		// crash. Never claim it is complete without proof; leave it unchanged.
+		const row = await c.env.db.prepare(`SELECT count(*) AS count FROM email
+			WHERE status = ? AND create_time <= datetime('now', '-15 minutes')`)
+			.bind(emailConst.status.SAVING).first();
+		if (row.count) console.error(JSON.stringify({event:'inbound_stalled_messages', count:row.count}));
+		if (c.env.account_deletion_test_only === 'enabled') {
+			const locks = await c.env.db.prepare(`SELECT count(*) AS count FROM attachment_object_lock
+				WHERE created_at <= unixepoch() - 900 AND (object_key LIKE 'internal/account/%' OR object_key LIKE 'attachments/%')`).bind().first();
+			// Expiring a lock can race a still-running writer. Report it, never
+			// release it automatically without a proper fencing protocol.
+			if (locks.count) console.error(JSON.stringify({event:'inbound_stale_reservations', count:locks.count}));
+		}
+		return row.count;
 	},
 
 	async autoClean(c) {
@@ -1379,17 +1419,21 @@ const emailService = {
 		}
 
 		const batchSize = 95;
+		let lastEmailId = 0;
+		let deferredGroups = 0;
 
 		while (true) {
-			const conditions = [lt(email.createTime, cutoff)];
+			const conditions = [lt(email.createTime, cutoff), gt(email.emailId, lastEmailId),
+				sql`NOT EXISTS (SELECT 1 FROM account_deletion_request WHERE user_id = ${email.userId})`];
 			if (excludeUserIds.length) {
 				conditions.push(notInArray(email.userId, excludeUserIds));
 			}
 
 			const rows = await orm(c)
-				.select({ emailId: email.emailId })
+				.select({ emailId: email.emailId, userId: email.userId })
 				.from(email)
 				.where(and(...conditions))
+				.orderBy(asc(email.emailId))
 				.limit(batchSize)
 				.all();
 
@@ -1397,13 +1441,28 @@ const emailService = {
 				break;
 			}
 
-			const emailIds = rows.map(row => row.emailId);
-			await this.physicsDelete(c, { emailIds: emailIds.join(',') });
+			lastEmailId = rows[rows.length - 1].emailId;
+			const groups = new Map();
+			for (const row of rows) {
+				if (!groups.has(row.userId)) groups.set(row.userId, []);
+				groups.get(row.userId).push(row.emailId);
+			}
+			for (const ids of groups.values()) {
+				try {
+					await this.physicsDelete(c, { emailIds: ids.join(',') });
+				} catch (error) {
+					// A reservation conflict or a just-requested deletion leaves
+					// this account untouched for the next scheduled pass.
+					if (!(error instanceof ReservationBusyError) && !(error instanceof PendingAccountDeletionError)) throw error;
+					deferredGroups++;
+				}
+			}
 
 			if (rows.length < batchSize) {
 				break;
 			}
 		}
+		if (deferredGroups) console.warn('Scheduled mail cleanup deferred account groups', { count: deferredGroups });
 	},
 
 	async batchDelete(c, params) {
@@ -1447,9 +1506,10 @@ const emailService = {
 			return;
 		}
 
-		await attService.removeByEmailIds(c, emailIds);
-
-		await orm(c).delete(email).where(conditions.length > 1 ? and(...conditions) : conditions[0]).run();
+		// Keep each IN query within D1's bind-parameter limit.
+		for (let offset = 0; offset < emailIds.length; offset += 90) {
+			await this.physicsDelete(c, {emailIds:emailIds.slice(offset, offset + 90).join(',')});
+		}
 	},
 
 	async physicsDeleteByAccountId(c, accountId) {
