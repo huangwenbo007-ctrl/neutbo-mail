@@ -64,6 +64,23 @@ const dbInit = {
 		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS google_email_deletion_rate (
 			user_id INTEGER PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL
 		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_email_code (
+			user_id INTEGER PRIMARY KEY, oauth_id INTEGER NOT NULL, subject TEXT NOT NULL,
+			email TEXT NOT NULL, generation INTEGER NOT NULL, challenge TEXT NOT NULL,
+			code_hash TEXT NOT NULL, sent_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0, verified_until INTEGER NOT NULL DEFAULT 0, reference_hash TEXT NOT NULL DEFAULT '',
+			consumed INTEGER NOT NULL DEFAULT 0
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_email_rate (
+			rate_key TEXT PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_email_slot (
+			email_hash TEXT PRIMARY KEY, challenge TEXT NOT NULL, issued_at INTEGER NOT NULL
+		)`).run();
+		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_recovery_support_ticket (
+			user_id INTEGER PRIMARY KEY, generation INTEGER NOT NULL, reference_hash TEXT NOT NULL,
+			created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0
+		)`).run();
 		await c.env.db.prepare(`CREATE TABLE IF NOT EXISTS account_deletion_request (
 			user_id INTEGER PRIMARY KEY, requested_at INTEGER NOT NULL, purge_after INTEGER NOT NULL,
 			state TEXT NOT NULL CHECK (state IN ('pending', 'purging')),

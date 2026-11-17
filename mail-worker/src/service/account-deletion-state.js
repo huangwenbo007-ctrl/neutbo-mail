@@ -33,12 +33,15 @@ export async function restoreDeletion(db, userId, now) {
 	return withAccountLock(db, userId, async () => {
 		const result = await db.batch([
 			db.prepare(`UPDATE user SET is_del = 0 WHERE user_id = ? AND is_del = 1 AND EXISTS
-				(SELECT 1 FROM account_deletion_request WHERE user_id = ? AND state = 'pending' AND purge_after > ?)`)
+				(SELECT 1 FROM account_deletion_request WHERE user_id = ? AND state = 'pending' AND purge_after > MAX(?,unixepoch()))`)
 				.bind(userId, userId, now),
 			db.prepare('DELETE FROM account_deletion_request WHERE user_id = ? AND state = \'pending\' AND changes() = 1')
 				.bind(userId),
+			...['account_recovery_email_code','account_recovery_support_ticket'].map(table =>
+				db.prepare(`DELETE FROM ${table} WHERE user_id=? AND EXISTS (SELECT 1 FROM user WHERE user_id=? AND is_del=0)
+					AND NOT EXISTS (SELECT 1 FROM account_deletion_request WHERE user_id=?)`).bind(userId,userId,userId)),
 		]);
-		return result.every(item => item.meta.changes === 1);
+		return result.slice(0,2).every(item => item.meta.changes === 1);
 	});
 }
 
@@ -74,7 +77,7 @@ export async function stagePurge(db, userId) {
 			db.prepare(`UPDATE role SET user_id = NULL WHERE user_id = ? AND ${stillPurging}`).bind(userId, userId, userId),
 			db.prepare(`UPDATE reg_key SET user_id = 0 WHERE user_id = ? AND ${stillPurging}`).bind(userId, userId, userId),
 			db.prepare(`DELETE FROM google_verified_contact WHERE oauth_id IN (SELECT oauth_id FROM oauth WHERE user_id=?) AND ${stillPurging}`).bind(userId,userId,userId),
-			...['star', 'attachments', 'email', 'account', 'oauth', 'google_deletion_challenge', 'google_email_deletion_code', 'google_email_deletion_rate', 'account_reauth_rate', 'user'].map(table =>
+			...['star', 'attachments', 'email', 'account', 'oauth', 'google_deletion_challenge', 'google_email_deletion_code', 'google_email_deletion_rate', 'account_recovery_email_code', 'account_recovery_support_ticket', 'account_reauth_rate', 'user'].map(table =>
 				db.prepare(`DELETE FROM ${table} WHERE user_id = ? AND ${stillPurging}`).bind(userId, userId, userId)),
 		]);
 	});

@@ -23,6 +23,19 @@ test('migration can be repeated without changing existing mailbox data', () => {
   db.close();
 });
 
+test('isolated preview upgrade adds missing recovery columns without inventing proof', () => {
+  const db=new DatabaseSync(':memory:');
+  db.exec("CREATE TABLE account_recovery_email_code(user_id INTEGER PRIMARY KEY); CREATE TABLE account_recovery_support_ticket(user_id INTEGER PRIMARY KEY, reference_hash TEXT NOT NULL); INSERT INTO account_recovery_email_code VALUES(1); INSERT INTO account_recovery_support_ticket VALUES(1,'old-hash');");
+  const reference=readFileSync(join(__dirname,'../migrations/preview-recovery-reference-column.sql'),'utf8');
+  const generation=readFileSync(join(__dirname,'../migrations/preview-recovery-ticket-generation.sql'),'utf8');
+  db.exec(reference); db.exec(generation);
+  assert.equal(db.prepare('SELECT reference_hash FROM account_recovery_email_code WHERE user_id=1').get().reference_hash,'');
+  assert.equal(db.prepare('SELECT generation FROM account_recovery_support_ticket WHERE user_id=1').get().generation,0);
+  assert.throws(()=>db.exec(reference),/duplicate column/);
+  assert.throws(()=>db.exec(generation),/duplicate column/);
+  db.close();
+});
+
 test('enforces the recovery period and known lifecycle states', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(readFileSync(join(__dirname, '../migrations/account-deletion-draft.sql'), 'utf8'));
@@ -241,7 +254,7 @@ test('requests, restores and locks an expired request atomically', async () => {
       catch (error) { raw.exec('ROLLBACK'); throw error; }
     },
   };
-  const start = 100;
+  const start = Math.floor(Date.now() / 1000);
   const due = start + 30 * 86400;
   await assert.rejects(requestDeletionRaw(db, 1, start), /Administrator identity is required/);
   assert.equal(await requestDeletion(db, 4, start), false);

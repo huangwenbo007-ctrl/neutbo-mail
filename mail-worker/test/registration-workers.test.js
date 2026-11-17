@@ -18,6 +18,7 @@ import { acquireObjectLock, releaseObjectLock } from '../src/service/account-del
 import { processTestKvAttachment } from '../src/service/attachment-cleanup-draft';
 import cryptoUtils from '../src/utils/crypto-utils';
 import { stageDueDeletionsForTest } from '../src/service/account-deletion-runner-draft';
+import { createSupportTicketForTest, sendRecoveryCodeForTest, verifyRecoveryCodeForTest, approveRecoveryForTest, cleanupRecoveryProofsForTest } from '../src/service/account-recovery-email-draft';
 
 const requestDeletion = (db, userId, now) => requestDeletionRaw(db, userId, now, 'admin@example.com');
 
@@ -442,6 +443,252 @@ it('rejects a pre-deletion session after deletion and after recovery', async () 
   const newLogin = await post('/login', {email:'session@example.com', password:'test-password'});
   expect(newLogin.code).toBe(200);
   expect((await requestWith(newLogin.data.token)).code).toBe(200);
+});
+
+it('requires verified Google email and the support reference before restoring an account', async () => {
+  const verified=await proof('recovery-register@external.test');
+  expect((await post('/register',{email:'recovery-owner@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='recovery-owner@example.com'").first();
+  const login=await post('/login',{email:'recovery-owner@example.com',password:'test-password'});
+  const oauth=await env.db.prepare("INSERT INTO oauth(user_id,platform,oauth_user_id) VALUES(?,'google','recovery-subject') RETURNING oauth_id").bind(user.user_id).first();
+  await env.db.prepare('INSERT INTO google_verified_contact(oauth_id,subject,email) VALUES(?,?,?)').bind(oauth.oauth_id,'recovery-subject','verified-google@gmail.test').run();
+  expect(await requestDeletion(env.db,user.user_id,Math.floor(Date.now()/1000))).toBe(true);
+  const c={env,req:{header:()=> '192.0.2.65'},set(){}};
+  const {supportReference:reference}=await createSupportTicketForTest(env,user.user_id);
+  expect(reference).toMatch(/^[0-9a-f]{32}$/);
+  await expect(createSupportTicketForTest(env,user.user_id)).rejects.toThrow();
+  await expect(sendRecoveryCodeForTest({...c,env:{...env,account_deletion_test_only:'disabled'}},{email:'recovery-owner@example.com'})).rejects.toThrow('restricted');
+  const unknown=await sendRecoveryCodeForTest(c,{email:'unknown@example.com'});
+  expect(unknown).toMatchObject({accepted:true,challenge:expect.any(String)});
+  expect(await sendRecoveryCodeForTest(c,{email:'unknown@example.com'})).toEqual(unknown);
+  await expect(approveRecoveryForTest(env,user.user_id,reference)).rejects.toThrow();
+  let code;
+  fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,options=>{
+    const message=JSON.parse(options.body);
+    expect(message.to).toEqual(['verified-google@gmail.test']);
+    code=message.text.match(/\b\d{6}\b/)[0];
+    return JSON.stringify({id:'recovery-mock'});
+  });
+  const {challenge}=await sendRecoveryCodeForTest(c,{email:'recovery-owner@example.com'});
+  expect(await sendRecoveryCodeForTest(c,{email:'recovery-owner@example.com'})).toEqual({accepted:true,challenge});
+  expect((await env.db.prepare('SELECT code_hash FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first()).code_hash).not.toContain(code);
+  const wrongReference=reference==='abcdef0123456789abcdef0123456789'?'11111111111111111111111111111111':'abcdef0123456789abcdef0123456789';
+  await expect(verifyRecoveryCodeForTest(c,{email:'recovery-owner@example.com',code,challenge,supportReference:wrongReference})).rejects.toThrow();
+  expect((await env.db.prepare('SELECT attempts FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first()).attempts).toBe(0);
+  const wrong=code==='000000'?'111111':'000000';
+  await expect(verifyRecoveryCodeForTest(c,{email:'recovery-owner@example.com',code:wrong,challenge,supportReference:reference})).rejects.toThrow();
+  expect((await env.db.prepare('SELECT attempts FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first()).attempts).toBe(1);
+  const attempts=await Promise.allSettled([
+    verifyRecoveryCodeForTest(c,{email:'recovery-owner@example.com',code,challenge,supportReference:reference}),
+    verifyRecoveryCodeForTest(c,{email:'recovery-owner@example.com',code,challenge,supportReference:reference}),
+  ]);
+  expect(attempts.filter(item=>item.status==='fulfilled')).toHaveLength(1);
+  expect(attempts.find(item=>item.status==='fulfilled').value).toEqual({verified:true});
+  expect(attempts.filter(item=>item.status==='rejected')).toHaveLength(1);
+  await env.db.prepare('UPDATE account_recovery_email_code SET sent_at=sent_at-61 WHERE user_id=?').bind(user.user_id).run();
+  expect(await sendRecoveryCodeForTest(c,{email:'recovery-owner@example.com'})).toMatchObject({accepted:true,challenge:expect.any(String)});
+  expect((await env.db.prepare('SELECT challenge FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first()).challenge).toBe(challenge);
+  await cleanupRecoveryProofsForTest(env,Math.floor(Date.now()/1000));
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first()).n).toBe(1);
+  await expect(verifyRecoveryCodeForTest(c,{email:'recovery-owner@example.com',code,challenge,supportReference:reference})).rejects.toThrow();
+  await expect(approveRecoveryForTest(env,user.user_id,wrongReference)).rejects.toThrow();
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(1);
+  const approvals=await Promise.allSettled([approveRecoveryForTest(env,user.user_id,reference),approveRecoveryForTest(env,user.user_id,reference)]);
+  expect(approvals.filter(item=>item.status==='fulfilled')).toHaveLength(1);
+  expect(approvals.find(item=>item.status==='fulfilled').value).toEqual({restored:true});
+  expect(approvals.filter(item=>item.status==='rejected')).toHaveLength(1);
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_deletion_request WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+  await expect(approveRecoveryForTest(env,user.user_id,reference)).rejects.toThrow();
+  expect((await (await SELF.fetch('https://local.test/api/my/loginUserInfo',{headers:{Authorization:login.data.token}})).json()).code).not.toBe(200);
+  expect((await post('/login',{email:'recovery-owner@example.com',password:'test-password'})).code).toBe(200);
+  // A second deletion inside the prior send cooldown must not revive old proof.
+  expect(await requestDeletion(env.db,user.user_id,Math.floor(Date.now()/1000))).toBe(true);
+  const nextTicket=await createSupportTicketForTest(env,user.user_id);
+  const cooling=await sendRecoveryCodeForTest(c,{email:'recovery-owner@example.com'});
+  expect(cooling.challenge).toBe(challenge);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+  await expect(verifyRecoveryCodeForTest(c,{email:'recovery-owner@example.com',code,challenge,supportReference:nextTicket.supportReference})).rejects.toThrow();
+  await env.db.prepare('UPDATE account_recovery_email_slot SET issued_at=issued_at-61').run();
+  let nextCode;
+  fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,options=>{nextCode=JSON.parse(options.body).text.match(/\b\d{6}\b/)[0];return JSON.stringify({id:'next-recovery'});});
+  const next=await sendRecoveryCodeForTest(c,{email:'recovery-owner@example.com'});
+  expect(next.challenge).not.toBe(challenge);
+  expect(await verifyRecoveryCodeForTest(c,{email:'recovery-owner@example.com',code:nextCode,challenge:next.challenge,supportReference:nextTicket.supportReference})).toEqual({verified:true});
+});
+
+it('limits wrong recovery codes and rejects an expired code', async () => {
+  const verified=await proof('recovery-limit@external.test');
+  expect((await post('/register',{email:'recovery-limit@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='recovery-limit@example.com'").first();
+  const oauth=await env.db.prepare("INSERT INTO oauth(user_id,platform,oauth_user_id) VALUES(?,'google','recovery-limit-subject') RETURNING oauth_id").bind(user.user_id).first();
+  await env.db.prepare('INSERT INTO google_verified_contact(oauth_id,subject,email) VALUES(?,?,?)').bind(oauth.oauth_id,'recovery-limit-subject','limit@gmail.test').run();
+  expect(await requestDeletion(env.db,user.user_id,Math.floor(Date.now()/1000))).toBe(true);
+  const c={env,req:{header:()=> '192.0.2.67'},set(){}}, {supportReference:reference}=await createSupportTicketForTest(env,user.user_id);
+  let code;
+  fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,options=>{code=JSON.parse(options.body).text.match(/\b\d{6}\b/)[0];return JSON.stringify({id:'recovery-mock'});});
+  const {challenge}=await sendRecoveryCodeForTest(c,{email:'recovery-limit@example.com'});
+  const wrong=code==='000000'?'111111':'000000';
+  for(let i=0;i<5;i++) await expect(verifyRecoveryCodeForTest(c,{email:'recovery-limit@example.com',code:wrong,challenge,supportReference:reference})).rejects.toThrow();
+  await expect(verifyRecoveryCodeForTest(c,{email:'recovery-limit@example.com',code,challenge,supportReference:reference})).rejects.toThrow();
+  expect((await env.db.prepare('SELECT attempts FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first()).attempts).toBe(5);
+  await env.db.prepare('UPDATE account_recovery_email_code SET attempts=0,expires_at=0 WHERE user_id=?').bind(user.user_id).run();
+  await expect(verifyRecoveryCodeForTest(c,{email:'recovery-limit@example.com',code,challenge,supportReference:reference})).rejects.toThrow();
+  await expect(approveRecoveryForTest(env,user.user_id,reference)).rejects.toThrow();
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(1);
+  await cleanupRecoveryProofsForTest(env,Math.floor(Date.now()/1000));
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+});
+
+it.each(['recovery period','support ticket'])('rejects a correct recovery code after the %s expires', async expired => {
+  const verified=await proof('recovery-expiry@external.test');
+  expect((await post('/register',{email:'recovery-expiry@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='recovery-expiry@example.com'").first();
+  const oauth=await env.db.prepare("INSERT INTO oauth(user_id,platform,oauth_user_id) VALUES(?,'google','recovery-expiry-subject') RETURNING oauth_id").bind(user.user_id).first();
+  await env.db.prepare('INSERT INTO google_verified_contact(oauth_id,subject,email) VALUES(?,?,?)').bind(oauth.oauth_id,'recovery-expiry-subject','expiry@gmail.test').run();
+  expect(await requestDeletion(env.db,user.user_id,Math.floor(Date.now()/1000))).toBe(true);
+  const {supportReference:reference}=await createSupportTicketForTest(env,user.user_id);
+  const c={env,req:{header:()=> '192.0.2.68'},set(){}};
+  let code;
+  fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,options=>{code=JSON.parse(options.body).text.match(/\b\d{6}\b/)[0];return JSON.stringify({id:'recovery-mock'});});
+  const {challenge}=await sendRecoveryCodeForTest(c,{email:'recovery-expiry@example.com'});
+  if(expired==='support ticket') await env.db.prepare('UPDATE account_recovery_support_ticket SET expires_at=0 WHERE user_id=?').bind(user.user_id).run();
+  else {const now=Math.floor(Date.now()/1000);await env.db.prepare('UPDATE account_deletion_request SET requested_at=?,purge_after=? WHERE user_id=?').bind(now-31*86400,now-86400,user.user_id).run();}
+  await expect(verifyRecoveryCodeForTest(c,{email:'recovery-expiry@example.com',code,challenge,supportReference:reference})).rejects.toThrow();
+  await expect(approveRecoveryForTest(env,user.user_id,reference)).rejects.toThrow();
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(1);
+});
+
+it('invalidates old support tickets across separate deletion requests', async () => {
+  const verified=await proof('recovery-generation@external.test');
+  expect((await post('/register',{email:'recovery-generation@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='recovery-generation@example.com'").first();
+  const now=Math.floor(Date.now()/1000);
+  expect(await requestDeletion(env.db,user.user_id,now)).toBe(true);
+  const first=await createSupportTicketForTest(env,user.user_id);
+  expect(await restoreDeletion(env.db,user.user_id,now)).toBe(true);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_recovery_support_ticket WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+  expect(await requestDeletion(env.db,user.user_id,now)).toBe(true);
+  const second=await createSupportTicketForTest(env,user.user_id);
+  expect(second.supportReference).not.toBe(first.supportReference);
+  // Simulate an older administrative writer which failed to remove the ticket.
+  await env.db.batch([env.db.prepare('UPDATE user SET is_del=0 WHERE user_id=?').bind(user.user_id),env.db.prepare('DELETE FROM account_deletion_request WHERE user_id=?').bind(user.user_id)]);
+  expect(await requestDeletion(env.db,user.user_id,now)).toBe(true);
+  const third=await createSupportTicketForTest(env,user.user_id);
+  expect(third.supportReference).not.toBe(second.supportReference);
+  expect((await env.db.prepare('SELECT generation FROM account_recovery_support_ticket WHERE user_id=?').bind(user.user_id).first()).generation).toBe(3);
+});
+
+it('does not restore an expired account using an earlier application timestamp', async () => {
+  const verified=await proof('recovery-stale-clock@external.test');
+  expect((await post('/register',{email:'recovery-stale-clock@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='recovery-stale-clock@example.com'").first();
+  const stale=Math.floor(Date.now()/1000)-31*86400;
+  expect(await requestDeletion(env.db,user.user_id,stale)).toBe(true);
+  expect(await restoreDeletion(env.db,user.user_id,stale+60)).toBe(false);
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(1);
+});
+
+it('does not recreate a recovery code when cleanup starts after eligibility was read', async () => {
+  const verified=await proof('recovery-purge-race@external.test');
+  expect((await post('/register',{email:'recovery-purge-race@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='recovery-purge-race@example.com'").first();
+  const oauth=await env.db.prepare("INSERT INTO oauth(user_id,platform,oauth_user_id) VALUES(?,'google','recovery-purge-subject') RETURNING oauth_id").bind(user.user_id).first();
+  await env.db.prepare('INSERT INTO google_verified_contact(oauth_id,subject,email) VALUES(?,?,?)').bind(oauth.oauth_id,'recovery-purge-subject','race@gmail.test').run();
+  const now=Math.floor(Date.now()/1000);
+  expect(await requestDeletion(env.db,user.user_id,now)).toBe(true);
+  const c={env,req:{header:()=> '192.0.2.69'},set(){}};
+  const original=settingService.query.bind(settingService);
+  const spy=vi.spyOn(settingService,'query').mockImplementationOnce(async (...args)=>{
+    await env.db.prepare('UPDATE account_deletion_request SET requested_at=?,purge_after=? WHERE user_id=?').bind(now-31*86400,now-86400,user.user_id).run();
+    expect(await claimDeletion(env.db,user.user_id,now)).toBe(true);
+    await stagePurge(env.db,user.user_id);
+    return original(...args);
+  });
+  try {expect(await sendRecoveryCodeForTest(c,{email:'recovery-purge-race@example.com'})).toMatchObject({accepted:true,challenge:expect.any(String)});} finally {spy.mockRestore();}
+  expect((await env.db.prepare('SELECT count(*) AS n FROM user WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+});
+
+it('does not consume a new deletion request’s code attempts with a delayed old request', async () => {
+  const verified=await proof('recovery-generation-race@external.test');
+  expect((await post('/register',{email:'recovery-generation-race@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='recovery-generation-race@example.com'").first();
+  const oauth=await env.db.prepare("INSERT INTO oauth(user_id,platform,oauth_user_id) VALUES(?,'google','generation-race-subject') RETURNING oauth_id").bind(user.user_id).first();
+  await env.db.prepare('INSERT INTO google_verified_contact(oauth_id,subject,email) VALUES(?,?,?)').bind(oauth.oauth_id,'generation-race-subject','race-contact@gmail.test').run();
+  const now=Math.floor(Date.now()/1000), c={env,req:{header:()=> '192.0.2.70'},set(){}};
+  expect(await requestDeletion(env.db,user.user_id,now)).toBe(true);
+  const oldTicket=await createSupportTicketForTest(env,user.user_id);
+  let oldCode;
+  fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,options=>{oldCode=JSON.parse(options.body).text.match(/\b\d{6}\b/)[0];return JSON.stringify({id:'old-recovery'});});
+  const oldDelivery=await sendRecoveryCodeForTest(c,{email:'recovery-generation-race@example.com'});
+  let interleaved=false;
+  const db={prepare(sql){
+    const statement=env.db.prepare(sql);
+    if (!sql.includes('UPDATE account_recovery_email_code SET attempts=attempts+1')) return statement;
+    return {bind(...args){const bound=statement.bind(...args);return {async first(){
+      interleaved=true;
+      expect(await restoreDeletion(env.db,user.user_id,now)).toBe(true);
+      expect(await requestDeletion(env.db,user.user_id,now)).toBe(true);
+      await createSupportTicketForTest(env,user.user_id);
+      await env.db.prepare('UPDATE account_recovery_email_slot SET issued_at=issued_at-61').run();
+      fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,JSON.stringify({id:'new-recovery'}));
+      await sendRecoveryCodeForTest(c,{email:'recovery-generation-race@example.com'});
+      return bound.first();
+    }};}};
+  }};
+  const delayed={...c,env:{...env,db}};
+  await expect(verifyRecoveryCodeForTest(delayed,{email:'recovery-generation-race@example.com',code:oldCode,challenge:oldDelivery.challenge,supportReference:oldTicket.supportReference})).rejects.toThrow();
+  expect(interleaved).toBe(true);
+  const current=await env.db.prepare('SELECT attempts,generation FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first();
+  expect(current).toMatchObject({attempts:0,generation:2});
+});
+
+it('does not consume a replacement code’s attempts with a delayed old verification', async () => {
+  const verified=await proof('recovery-resend-race@external.test');
+  expect((await post('/register',{email:'recovery-resend-race@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='recovery-resend-race@example.com'").first();
+  const oauth=await env.db.prepare("INSERT INTO oauth(user_id,platform,oauth_user_id) VALUES(?,'google','resend-race-subject') RETURNING oauth_id").bind(user.user_id).first();
+  await env.db.prepare('INSERT INTO google_verified_contact(oauth_id,subject,email) VALUES(?,?,?)').bind(oauth.oauth_id,'resend-race-subject','resend-race@gmail.test').run();
+  expect(await requestDeletion(env.db,user.user_id,Math.floor(Date.now()/1000))).toBe(true);
+  const ticket=await createSupportTicketForTest(env,user.user_id), c={env,req:{header:()=> '192.0.2.71'},set(){}};
+  let oldCode,newCode,newChallenge;
+  fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,options=>{oldCode=JSON.parse(options.body).text.match(/\b\d{6}\b/)[0];return JSON.stringify({id:'old-code'});});
+  const oldDelivery=await sendRecoveryCodeForTest(c,{email:'recovery-resend-race@example.com'});
+  const db={prepare(sql){
+    const statement=env.db.prepare(sql);
+    if (!sql.includes('UPDATE account_recovery_email_code SET attempts=attempts+1')) return statement;
+    return {bind(...args){const bound=statement.bind(...args);return {async first(){
+      await env.db.prepare('UPDATE account_recovery_email_slot SET issued_at=issued_at-61').run();
+      fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,options=>{newCode=JSON.parse(options.body).text.match(/\b\d{6}\b/)[0];return JSON.stringify({id:'new-code'});});
+      newChallenge=(await sendRecoveryCodeForTest(c,{email:'recovery-resend-race@example.com'})).challenge;
+      return bound.first();
+    }};}};
+  }};
+  await expect(verifyRecoveryCodeForTest({...c,env:{...env,db}},{email:'recovery-resend-race@example.com',code:oldCode,challenge:oldDelivery.challenge,supportReference:ticket.supportReference})).rejects.toThrow();
+  const current=await env.db.prepare('SELECT attempts,challenge FROM account_recovery_email_code WHERE user_id=?').bind(user.user_id).first();
+  expect(current).toMatchObject({attempts:0,challenge:newChallenge});
+  expect(newChallenge).not.toBe(oldDelivery.challenge);
+  expect(await verifyRecoveryCodeForTest(c,{email:'recovery-resend-race@example.com',code:newCode,challenge:newChallenge,supportReference:ticket.supportReference})).toEqual({verified:true});
+});
+
+it.each(['contact','session','deadline'])('rejects a recovery proof after the %s changes', async changed => {
+  const verified=await proof('recovery-change@external.test');
+  expect((await post('/register',{email:'recovery-change@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='recovery-change@example.com'").first();
+  const oauth=await env.db.prepare("INSERT INTO oauth(user_id,platform,oauth_user_id) VALUES(?,'google','recovery-change-subject') RETURNING oauth_id").bind(user.user_id).first();
+  await env.db.prepare('INSERT INTO google_verified_contact(oauth_id,subject,email) VALUES(?,?,?)').bind(oauth.oauth_id,'recovery-change-subject','old-contact@gmail.test').run();
+  expect(await requestDeletion(env.db,user.user_id,Math.floor(Date.now()/1000))).toBe(true);
+  const c={env,req:{header:()=> '192.0.2.66'},set(){}}, {supportReference:reference}=await createSupportTicketForTest(env,user.user_id);
+  let code;
+  fetchMock.get('https://api.resend.com').intercept({path:'/emails',method:'POST'}).reply(200,options=>{code=JSON.parse(options.body).text.match(/\b\d{6}\b/)[0];return JSON.stringify({id:'recovery-mock'});});
+  const {challenge}=await sendRecoveryCodeForTest(c,{email:'recovery-change@example.com'});
+  expect(await verifyRecoveryCodeForTest(c,{email:'recovery-change@example.com',code,challenge,supportReference:reference})).toEqual({verified:true});
+  if (changed==='contact') await env.db.prepare("UPDATE google_verified_contact SET email='new-contact@gmail.test' WHERE oauth_id=?").bind(oauth.oauth_id).run();
+  else if (changed==='session') await env.db.prepare('UPDATE account_session_generation SET generation=generation+1 WHERE user_id=?').bind(user.user_id).run();
+  else {const now=Math.floor(Date.now()/1000);await env.db.prepare('UPDATE account_deletion_request SET requested_at=?,purge_after=? WHERE user_id=?').bind(now-31*86400,now-86400,user.user_id).run();}
+  await expect(approveRecoveryForTest(env,user.user_id,reference)).rejects.toThrow();
+  expect((await env.db.prepare('SELECT is_del FROM user WHERE user_id=?').bind(user.user_id).first()).is_del).toBe(1);
 });
 
 it('allows administrator recovery during the grace period but blocks it after expiry', async () => {
