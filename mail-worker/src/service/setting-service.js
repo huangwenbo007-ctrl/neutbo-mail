@@ -224,7 +224,7 @@ const settingService = {
 			linuxdoSwitch: settingRow.linuxdoSwitch,
 			githubClientId: settingRow.githubClientId,
 			githubSwitch: settingRow.githubSwitch,
-			googleClientId: settingRow.googleClientId,
+			googleClientId: c.env.google_oauth_client_id || settingRow.googleClientId,
 			googleSwitch: settingRow.googleSwitch,
 			minEmailPrefix: settingRow.minEmailPrefix,
 			projectLink: settingRow.projectLink

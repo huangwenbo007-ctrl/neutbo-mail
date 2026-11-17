@@ -5,6 +5,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import userService from "./user-service";
 import loginService from "./login-service";
 import settingService from "./setting-service";
+import {googleCredentials} from "./google-credentials";
 import {t} from '../i18n/i18n';
 import {sign, verify} from 'hono/jwt';
 
@@ -136,10 +137,12 @@ const oauthService = {
 
 		const setting = await settingService.query(c);
 		this.assertEnabled(setting, 'googleSwitch');
+		const credentials = googleCredentials(c.env, setting);
+		if (!credentials) throw new BizError('Google 登录配置不完整');
 
 		const reqParams = new URLSearchParams()
-		reqParams.append('client_id', setting.googleClientId)
-		reqParams.append('client_secret', setting.googleClientSecret)
+		reqParams.append('client_id', credentials.id)
+		reqParams.append('client_secret', credentials.secret)
 		reqParams.append('code', code)
 		reqParams.append('redirect_uri', redirectUri)
 		reqParams.append('grant_type', 'authorization_code')
