@@ -31,6 +31,10 @@
           <el-button type="primary" @click="pwdShow = true">{{$t('changePwdBtn')}}</el-button>
         </div>
       </div>
+      <div v-if="deletionDraftEnabled" class="item setting-row">
+        <div>恢复邮箱</div>
+        <el-button @click="recoveryContactVisible = true">设置或更改</el-button>
+      </div>
     </div>
     <div class="language">
       <div class="title">{{$t('language')}}</div>
@@ -69,6 +73,7 @@
         <el-button type="danger" :disabled="!deletionDraftEnabled" @click="deleteDialogVisible = true">{{$t('deleteUserBtn')}}</el-button>
       </div>
     </div>
+    <RecoveryContactDialog v-if="deletionDraftEnabled" v-model="recoveryContactVisible" />
     <el-dialog v-model="pwdShow" :title="$t('changePassword')" width="340" @closed="clearPasswordForm">
       <div class="update-pwd">
         <p>{{ $t('passwordChangeHelp') }}</p>
@@ -80,6 +85,7 @@
     </el-dialog>
     <el-dialog v-model="deleteDialogVisible" :title="$t('deleteUser')" width="min(420px, 90vw)" @closed="clearDeletionForm">
       <p>{{ $t('deletionGraceInfo') }}</p>
+      <p>请先设置可用的恢复邮箱，或确认已绑定 Google 邮箱，以便在恢复期内验证身份。</p>
       <p>{{ $t('deletionCurrentPassword') }}</p>
       <el-input v-model="deletePassword" type="password" show-password autocomplete="current-password"
         :placeholder="$t('deletionCurrentPassword')" @keyup.enter="submitDeletion" />
@@ -111,6 +117,7 @@ import {useI18n} from "vue-i18n";
 import {useSettingStore} from "@/store/setting.js";
 import {useUiStore} from "@/store/ui.js";
 import ThemeSelector from "@/components/theme-selector/index.vue";
+import RecoveryContactDialog from '@/components/recovery/RecoveryContactDialog.vue';
 
 const { t } = useI18n()
 const accountStore = useAccountStore()
@@ -118,6 +125,7 @@ const settingStore = useSettingStore()
 const uiStore = useUiStore()
 const userStore = useUserStore();
 const setPwdLoading = ref(false)
+const recoveryContactVisible = ref(false)
 const setNameShow = ref(false)
 const accountName = ref(null)
 const langSelect = ref(settingStore.lang)

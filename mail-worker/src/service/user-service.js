@@ -393,9 +393,10 @@ const userService = {
 		const { userId, type } = params
 		const deletion = await c.env.db.prepare('SELECT state FROM account_deletion_request WHERE user_id = ?').bind(userId).first();
 		if (deletion) {
-			const restored = await restoreDeletion(c.env.db, userId, Math.floor(Date.now() / 1000));
+			if (c.env.account_deletion_test_only === 'enabled') throw new BizError('请通过恢复审核完成身份验证后处理此申请');
+			const restored=await restoreDeletion(c.env.db,userId,Math.floor(Date.now()/1000));
 			if (!restored) throw new BizError('恢复期已结束或账号正在清理，无法恢复');
-			await c.env.kv.delete(KvConst.AUTH_INFO + userId);
+			await c.env.kv.delete(KvConst.AUTH_INFO+userId);
 			return;
 		}
 		const legacyRestored = await orm(c)

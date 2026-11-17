@@ -57,6 +57,7 @@
           <el-button class="btn" type="primary" @click="submit" :loading="loginLoading"
           >{{ $t('loginBtn') }}
           </el-button>
+          <el-button v-if="recoveryPreviewEnabled" text @click="recoveryVisible = true">恢复已删除账号</el-button>
           <el-button v-for="p in oauthProviders" :key="p.key" class="btn" style="margin-top: 10px" @click="oauthLogin(p.key)">
             <el-avatar v-if="p.iconType === 'image'" :src="p.icon" :size="18" style="margin-right: 10px" />
             <Icon v-else :icon="p.icon" width="18" height="18" style="margin-right: 10px" />
@@ -129,6 +130,7 @@
         </template>
       </div>
     </div>
+    <RecoveryDialog v-if="recoveryPreviewEnabled" v-model="recoveryVisible" />
     <el-dialog class="bind-dialog" v-model="showBindForm" title="注册邮箱" @closed="resetBindTurnstile">
       <div class="bind-container">
         <p>已为你建议邮箱地址，可以修改后继续。</p>
@@ -175,6 +177,7 @@
 <script setup>
 import router from "@/router";
 import {computed, nextTick, onUnmounted, reactive, ref} from "vue";
+import RecoveryDialog from '@/components/recovery/RecoveryDialog.vue';
 import {login} from "@/request/login.js";
 import {register} from "@/request/login.js";
 import {sendRegistrationCode} from "@/request/login.js";
@@ -199,6 +202,8 @@ const uiStore = useUiStore();
 const settingStore = useSettingStore();
 const brandLogo = `${import.meta.env.BASE_URL}neutbo-bird-v1.svg`
 const loginLoading = ref(false)
+const recoveryPreviewEnabled = import.meta.env.VITE_ACCOUNT_DELETION_TEST_ONLY === 'enabled'
+const recoveryVisible = ref(false)
 const bindLoading = ref(false)
 const oauthLoading = ref(false);
 const showBindForm = ref(false);

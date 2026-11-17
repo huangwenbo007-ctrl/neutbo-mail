@@ -77,7 +77,7 @@ export async function stagePurge(db, userId) {
 			db.prepare(`UPDATE role SET user_id = NULL WHERE user_id = ? AND ${stillPurging}`).bind(userId, userId, userId),
 			db.prepare(`UPDATE reg_key SET user_id = 0 WHERE user_id = ? AND ${stillPurging}`).bind(userId, userId, userId),
 			db.prepare(`DELETE FROM google_verified_contact WHERE oauth_id IN (SELECT oauth_id FROM oauth WHERE user_id=?) AND ${stillPurging}`).bind(userId,userId,userId),
-			...['star', 'attachments', 'email', 'account', 'oauth', 'google_deletion_challenge', 'google_email_deletion_code', 'google_email_deletion_rate', 'account_recovery_email_code', 'account_recovery_support_ticket', 'account_reauth_rate', 'user'].map(table =>
+			...['star', 'attachments', 'email', 'account', 'oauth', 'google_deletion_challenge', 'google_email_deletion_code', 'google_email_deletion_rate', 'account_recovery_email_code', 'account_recovery_support_ticket', 'account_recovery_support_audit', 'account_recovery_contact', 'account_recovery_contact_code', 'account_reauth_rate', 'user'].map(table =>
 				db.prepare(`DELETE FROM ${table} WHERE user_id = ? AND ${stillPurging}`).bind(userId, userId, userId)),
 		]);
 	});

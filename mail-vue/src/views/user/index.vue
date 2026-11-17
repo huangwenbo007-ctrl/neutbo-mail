@@ -105,6 +105,7 @@
                         {{ setStatusName(props.row) }}
                       </el-dropdown-item>
                       <el-dropdown-item v-else @click="restore(props.row)">{{ $t('restore') }}</el-dropdown-item>
+                      <el-dropdown-item v-if="recoveryPreviewEnabled && userStore.user.type === 0 && props.row.isDel === 1" @click="openRecoverySupport(props.row)">恢复审核</el-dropdown-item>
                     </template>
                     <el-dropdown-item @click="openAccountList(props.row.userId)" >{{ $t('account') }}</el-dropdown-item>
                     <el-dropdown-item @click="openDetails(props.row)" >{{ $t('details') }}</el-dropdown-item>
@@ -373,6 +374,7 @@
         </el-dropdown-menu>
       </template>
     </el-dropdown>
+    <RecoverySupportDialog v-if="recoveryPreviewEnabled" v-model="recoverySupportVisible" :user="recoverySupportUser" @restored="getUserList(false)" />
   </div>
 </template>
 
@@ -399,6 +401,7 @@ import {isEmail} from "@/utils/verify-utils.js";
 import {useRoleStore} from "@/store/role.js";
 import {useUserStore} from "@/store/user.js";
 import {useI18n} from 'vue-i18n';
+import RecoverySupportDialog from '@/components/recovery/RecoverySupportDialog.vue';
 
 defineOptions({
   name: 'user'
@@ -407,6 +410,10 @@ defineOptions({
 const {t, locale} = useI18n();
 const roleStore = useRoleStore()
 const userStore = useUserStore()
+const recoveryPreviewEnabled = import.meta.env.VITE_ACCOUNT_DELETION_TEST_ONLY === 'enabled'
+const recoverySupportVisible = ref(false)
+const recoverySupportUser = ref(null)
+function openRecoverySupport(user) { recoverySupportUser.value = user; recoverySupportVisible.value = true }
 const settingStore = useSettingStore()
 const oauthPlatformMap = {
   google: { key: 'google', label: 'Google', icon: 'devicon:google', iconType: 'iconify' },

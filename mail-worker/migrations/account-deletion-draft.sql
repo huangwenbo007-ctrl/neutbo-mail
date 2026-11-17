@@ -68,6 +68,19 @@ CREATE TABLE IF NOT EXISTS account_recovery_support_ticket (
   user_id INTEGER PRIMARY KEY, generation INTEGER NOT NULL, reference_hash TEXT NOT NULL,
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS account_recovery_support_audit (
+  audit_id INTEGER PRIMARY KEY AUTOINCREMENT, actor_user_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+  target_hash TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('ticket_create','approve')),
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_recovery_contact (
+  user_id INTEGER PRIMARY KEY, email TEXT NOT NULL, version INTEGER NOT NULL, verified_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_recovery_contact_code (
+  user_id INTEGER PRIMARY KEY, email TEXT NOT NULL, challenge TEXT NOT NULL, code_hash TEXT NOT NULL,
+  session_hash TEXT NOT NULL, generation INTEGER NOT NULL, sent_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0, consumed INTEGER NOT NULL DEFAULT 0
+);
 
 -- This queue is only a schema sketch. Shared content-addressed objects require
 -- coordination with every upload/attachment writer before deletion is safe.

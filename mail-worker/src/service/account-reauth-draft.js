@@ -37,6 +37,11 @@ async function passwordSnapshot(db, userId, password, now) {
 	return await verifyPassword(password, user.salt, user.password) ? user : null;
 }
 
+// Internal service helper only; credential snapshots must never reach a client.
+export async function passwordSnapshotForRecovery(db,userId,password,now) {
+	return passwordSnapshot(db,userId,password,now);
+}
+
 export async function checkPasswordReauth(db, userId, password, now) {
 	return Boolean(await passwordSnapshot(db, userId, password, now));
 }
@@ -62,16 +67,24 @@ export async function changePasswordWithReauth(db, userId, oldPassword, newPassw
 
 // Disconnected prototype. Authentication, identity and time must be supplied by
 // trusted server code. Never expose the credential snapshot as a client proof.
-export async function requestPasswordDeletion(db, userId, password, now, adminEmail) {
+export async function requestPasswordDeletion(db, userId, password, now, adminEmail, domains) {
 	if (typeof adminEmail !== 'string' || !adminEmail.trim()) throw new Error('Administrator identity is required');
+	if (!Array.isArray(domains) || !domains.length || domains.some(d=>typeof d!=='string'||!d.trim())) throw new Error('Mail domains are required');
+	const internalDomains=domains.map(d=>d.trim().toLowerCase());
+	const placeholders=internalDomains.map(()=>'?').join(',');
 	const snapshot = await passwordSnapshot(db, userId, password, now);
 	if (!snapshot) return false;
 	return withAccountLock(db, userId, async () => {
 		// Credential predicates close the race with a concurrent password reset.
 		const result = await db.batch([
 			db.prepare(`UPDATE user SET is_del = 1 WHERE user_id = ? AND is_del = 0 AND status = 0
-				AND email COLLATE NOCASE != ? AND salt = ? AND password = ?`)
-				.bind(userId, adminEmail.trim(), snapshot.salt, snapshot.password),
+				AND email COLLATE NOCASE != ? AND salt = ? AND password = ? AND (
+				EXISTS (SELECT 1 FROM account_recovery_contact rc WHERE rc.user_id=user.user_id AND instr(rc.email,'@')>1
+				AND lower(substr(rc.email,instr(rc.email,'@')+1)) NOT IN (${placeholders})) OR
+				EXISTS (SELECT 1 FROM oauth o JOIN google_verified_contact g ON g.oauth_id=o.oauth_id AND g.subject=o.oauth_user_id
+				WHERE o.user_id=user.user_id AND o.platform='google' AND instr(g.email,'@')>1
+				AND lower(substr(g.email,instr(g.email,'@')+1)) NOT IN (${placeholders})))`)
+				.bind(userId, adminEmail.trim(), snapshot.salt, snapshot.password,...internalDomains,...internalDomains),
 			db.prepare(`INSERT INTO account_deletion_request (user_id, requested_at, purge_after, state)
 				SELECT ?, ?, ?, 'pending' WHERE changes() = 1`).bind(userId, now, now + 2592000),
 			db.prepare(`INSERT INTO account_session_generation (user_id, generation)

@@ -1,5 +1,5 @@
-// Isolated test prototype only. No public route or support UI calls these
-// functions. Production approval requires independent authorization and audit.
+// Isolated preview only. Production requires further review of anti-abuse,
+// support identity verification, old writers, retention and account cleanup.
 import { Resend } from 'resend';
 import BizError from '../error/biz-error';
 import settingService from './setting-service';
@@ -32,35 +32,92 @@ async function rate(env, key, now, limit) {
 		count=CASE WHEN window_start<=? THEN 1 ELSE count+1 END WHERE window_start<=? OR count<? RETURNING count`)
 		.bind(key,now,now-3600,now-3600,now-3600,limit).first();
 }
+// Aliases are fixed server-side strings, never client input. Zero denotes a
+// separately verified external contact; positive IDs identify Google links.
+function contactMatches(proof) {
+	return `((${proof}.oauth_id=0 AND EXISTS (SELECT 1 FROM account_recovery_contact rc WHERE rc.user_id=u.user_id
+		AND CAST(rc.version AS TEXT)=${proof}.subject AND rc.email=${proof}.email)) OR
+		(${proof}.oauth_id>0 AND EXISTS (SELECT 1 FROM oauth o JOIN google_verified_contact g ON g.oauth_id=o.oauth_id AND g.subject=o.oauth_user_id
+		WHERE o.user_id=u.user_id AND o.platform='google' AND o.oauth_id=${proof}.oauth_id AND o.oauth_user_id=${proof}.subject AND g.email=${proof}.email)))`;
+}
+function internalDomains(env) {
+	const domains=Array.isArray(env.domain)?env.domain:JSON.parse(env.domain);
+	if(!domains.length||domains.some(d=>typeof d!=='string'||!d.trim())) throw new Error('Mail domains are required');
+	return domains.map(d=>d.trim().toLowerCase());
+}
 async function eligible(env, email, now) {
-	return env.db.prepare(`SELECT u.user_id,o.oauth_id,o.oauth_user_id AS subject,g.email,
+	const internal=internalDomains(env), placeholders=internal.map(()=>'?').join(',');
+	return env.db.prepare(`SELECT u.user_id,c.oauth_id,c.subject,c.email,
 		COALESCE(s.generation,0) AS generation,r.purge_after FROM user u
 		JOIN account_deletion_request r ON r.user_id=u.user_id AND r.state='pending' AND r.purge_after>?
-		JOIN oauth o ON o.user_id=u.user_id AND o.platform='google'
-		JOIN google_verified_contact g ON g.oauth_id=o.oauth_id AND g.subject=o.oauth_user_id
+		JOIN (SELECT user_id,0 AS oauth_id,CAST(version AS TEXT) AS subject,email,0 AS priority FROM account_recovery_contact
+		UNION ALL SELECT o.user_id,o.oauth_id,o.oauth_user_id,g.email,1 FROM oauth o JOIN google_verified_contact g ON g.oauth_id=o.oauth_id AND g.subject=o.oauth_user_id WHERE o.platform='google') c ON c.user_id=u.user_id
 		LEFT JOIN account_session_generation s ON s.user_id=u.user_id
-		WHERE u.email COLLATE NOCASE=? AND u.email COLLATE NOCASE!=? AND u.is_del=1 AND u.status=0 LIMIT 1`)
-		.bind(now,email,env.admin.trim()).first();
+		WHERE u.email COLLATE NOCASE=? AND u.email COLLATE NOCASE!=? AND u.is_del=1 AND u.status=0
+		AND instr(c.email,'@')>1 AND lower(substr(c.email,instr(c.email,'@')+1)) NOT IN (${placeholders}) ORDER BY c.priority LIMIT 1`)
+		.bind(now,email,env.admin.trim(),...internal).first();
 }
 
-// Simulates a support-created ticket. This is not an authorization boundary:
-// any future API must authenticate support and audit this operation.
-export async function createSupportTicketForTest(env, userId) {
+async function requireSupportAdmin(env, actorId, actorGeneration) {
+	const configured=String(env.recovery_support_admin_user_id||'');
+	if (!/^[1-9]\d{0,14}$/.test(configured) || !Number.isSafeInteger(actorId) || actorId!==Number(configured) ||
+		!Number.isSafeInteger(actorGeneration) || actorGeneration<0) throw new BizError('无权处理恢复申请',403);
+	const row=await env.db.prepare(`SELECT 1 AS allowed FROM user u WHERE u.user_id=? AND u.email COLLATE NOCASE=? AND u.is_del=0 AND u.status=0
+		AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=u.user_id),0)=?`)
+		.bind(actorId,env.admin.trim(),actorGeneration).first();
+	if (!row) throw new BizError('无权处理恢复申请',403);
+}
+
+export async function createSupportTicketForTest(env, userId, actorId, actorGeneration) {
 	checkEnvironment(env);
 	if (!Number.isSafeInteger(userId) || userId<=0) throw fail();
+	await requireSupportAdmin(env,actorId,actorGeneration);
 	const reference=crypto.randomUUID().replace(/-/g,'');
 	const hash=await mac(env.jwt_secret,'recovery-support-reference:'+reference);
-	const created=await env.db.prepare(`INSERT INTO account_recovery_support_ticket(user_id,generation,reference_hash,created_at,expires_at,closed)
+	const targetHash=await mac(env.jwt_secret,'recovery-audit-target:'+userId);
+	const result=await env.db.batch([
+		env.db.prepare(`INSERT INTO account_recovery_support_ticket(user_id,generation,reference_hash,created_at,expires_at,closed)
 		SELECT u.user_id,COALESCE(s.generation,0),?,unixepoch(),MIN(unixepoch()+86400,r.purge_after),0 FROM user u
 		JOIN account_deletion_request r ON r.user_id=u.user_id LEFT JOIN account_session_generation s ON s.user_id=u.user_id
 		WHERE u.user_id=? AND u.is_del=1 AND u.status=0
 		AND u.email COLLATE NOCASE!=? AND r.state='pending' AND r.purge_after>unixepoch()
+		AND EXISTS (SELECT 1 FROM user admin WHERE admin.user_id=? AND admin.email COLLATE NOCASE=? AND admin.is_del=0 AND admin.status=0
+		AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=admin.user_id),0)=?)
 		ON CONFLICT(user_id) DO UPDATE SET generation=excluded.generation,reference_hash=excluded.reference_hash,created_at=excluded.created_at,
 		expires_at=excluded.expires_at,closed=0 WHERE account_recovery_support_ticket.closed=1 OR account_recovery_support_ticket.expires_at<=unixepoch()
-		OR account_recovery_support_ticket.generation!=excluded.generation
-		RETURNING user_id`).bind(hash,userId,env.admin.trim()).first();
-	if (!created) throw fail();
+		OR account_recovery_support_ticket.generation!=excluded.generation`).bind(hash,userId,env.admin.trim(),actorId,env.admin.trim(),actorGeneration),
+		env.db.prepare(`INSERT INTO account_recovery_support_audit(actor_user_id,user_id,target_hash,action,created_at)
+			SELECT ?,?,?,'ticket_create',unixepoch() WHERE changes()=1`).bind(actorId,userId,targetHash),
+	]);
+	if (!result.every(item=>item.meta.changes===1)) throw fail();
 	return {supportReference:reference};
+}
+
+export async function supportRecoveryStatusForTest(env,userId,actorId,actorGeneration) {
+	checkEnvironment(env);
+	await requireSupportAdmin(env,actorId,actorGeneration);
+	if (!Number.isSafeInteger(userId) || userId<=0) throw fail();
+	const domains=internalDomains(env), placeholders=domains.map(()=>'?').join(',');
+	const row=await env.db.prepare(`SELECT t.expires_at AS ticket_expires, r.purge_after,
+		CASE WHEN p.verified_until>unixepoch() AND p.consumed=0 AND p.reference_hash=t.reference_hash
+		AND p.generation=t.generation AND t.generation=COALESCE(s.generation,0)
+		AND instr(p.email,'@')>1 AND lower(substr(p.email,instr(p.email,'@')+1)) NOT IN (${placeholders})
+		AND ${contactMatches('p')}
+		THEN 1 ELSE 0 END AS verified
+		FROM account_recovery_support_ticket t JOIN account_deletion_request r ON r.user_id=t.user_id
+		JOIN user u ON u.user_id=t.user_id AND u.is_del=1 AND u.status=0
+		LEFT JOIN account_session_generation s ON s.user_id=u.user_id
+		LEFT JOIN account_recovery_email_code p ON p.user_id=t.user_id
+		WHERE t.user_id=? AND t.closed=0 AND t.expires_at>unixepoch() AND r.state='pending' AND r.purge_after>unixepoch()
+		AND EXISTS (SELECT 1 FROM user admin WHERE admin.user_id=? AND admin.email COLLATE NOCASE=? AND admin.is_del=0 AND admin.status=0
+		AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=admin.user_id),0)=?)`)
+		.bind(...domains,userId,actorId,env.admin.trim(),actorGeneration).first();
+	const targetHash=await mac(env.jwt_secret,'recovery-audit-target:'+userId);
+	const history=await env.db.prepare(`SELECT actor_user_id,action,created_at FROM account_recovery_support_audit WHERE target_hash=?
+		AND EXISTS (SELECT 1 FROM user admin WHERE admin.user_id=? AND admin.email COLLATE NOCASE=? AND admin.is_del=0 AND admin.status=0
+		AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=admin.user_id),0)=?)
+		ORDER BY audit_id DESC LIMIT 10`).bind(targetHash,actorId,env.admin.trim(),actorGeneration).all();
+	return row ? {available:true,ticketExpires:row.ticket_expires,recoverUntil:row.purge_after,verified:row.verified===1,history:history.results} : {available:false,history:history.results};
 }
 
 export async function sendRecoveryCodeForTest(c, input) {
@@ -87,6 +144,7 @@ export async function sendRecoveryCodeForTest(c, input) {
 	const contact=await eligible(env,email,now);
 	if (!contact || !mailbox(contact.email)) return generic;
 	const domains=Array.isArray(env.domain) ? env.domain : JSON.parse(env.domain);
+	const internal=internalDomains(env), placeholders=internal.map(()=>'?').join(',');
 	const contactDomain=contact.email.slice(contact.email.lastIndexOf('@')+1).toLowerCase();
 	if (domains.some(d=>d.toLowerCase()===contactDomain)) return generic;
 	const setting=await settingService.query(c);
@@ -100,18 +158,25 @@ export async function sendRecoveryCodeForTest(c, input) {
 		(user_id,oauth_id,subject,email,generation,challenge,code_hash,sent_at,expires_at,attempts,verified_until,consumed)
 		SELECT ?,?,?,?,?,?,?,unixepoch(),unixepoch()+300,0,0,0 WHERE EXISTS (
 		SELECT 1 FROM user u JOIN account_deletion_request r ON r.user_id=u.user_id
-		JOIN oauth o ON o.user_id=u.user_id AND o.platform='google' JOIN google_verified_contact g ON g.oauth_id=o.oauth_id AND g.subject=o.oauth_user_id
 		WHERE u.user_id=? AND u.email COLLATE NOCASE=? AND u.email COLLATE NOCASE!=? AND u.is_del=1 AND u.status=0
-		AND r.state='pending' AND r.purge_after>unixepoch() AND o.oauth_id=? AND o.oauth_user_id=? AND g.email=?
+		AND r.state='pending' AND r.purge_after>unixepoch() AND ((?=0 AND EXISTS (SELECT 1 FROM account_recovery_contact rc WHERE rc.user_id=u.user_id AND CAST(rc.version AS TEXT)=? AND rc.email=?))
+		OR (?>0 AND EXISTS (SELECT 1 FROM oauth o JOIN google_verified_contact g ON g.oauth_id=o.oauth_id AND g.subject=o.oauth_user_id WHERE o.user_id=u.user_id AND o.platform='google' AND o.oauth_id=? AND o.oauth_user_id=? AND g.email=?)))
 		AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=u.user_id),0)=?)
 		AND EXISTS (SELECT 1 FROM account_recovery_email_slot WHERE email_hash=? AND challenge=?)
 		ON CONFLICT(user_id) DO UPDATE SET oauth_id=excluded.oauth_id,
 		subject=excluded.subject,email=excluded.email,generation=excluded.generation,challenge=excluded.challenge,
 		code_hash=excluded.code_hash,sent_at=excluded.sent_at,expires_at=excluded.expires_at,attempts=0,verified_until=0,reference_hash='',consumed=0
-		WHERE (verified_until<=unixepoch() OR consumed=1) AND EXISTS (SELECT 1 FROM account_recovery_email_slot WHERE email_hash=? AND challenge=?)
+		WHERE (verified_until<=unixepoch() OR consumed=1 OR instr(account_recovery_email_code.email,'@')<=1
+		OR lower(substr(account_recovery_email_code.email,instr(account_recovery_email_code.email,'@')+1)) IN (${placeholders})
+		OR NOT EXISTS (SELECT 1 FROM user u JOIN account_deletion_request r ON r.user_id=u.user_id
+		JOIN account_recovery_support_ticket t ON t.user_id=u.user_id
+		WHERE u.user_id=account_recovery_email_code.user_id AND u.is_del=1 AND u.status=0 AND r.state='pending' AND r.purge_after>unixepoch()
+		AND t.closed=0 AND t.expires_at>unixepoch() AND t.generation=account_recovery_email_code.generation
+		AND t.reference_hash=account_recovery_email_code.reference_hash AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=u.user_id),0)=account_recovery_email_code.generation
+		AND ${contactMatches('account_recovery_email_code')})) AND EXISTS (SELECT 1 FROM account_recovery_email_slot WHERE email_hash=? AND challenge=?)
 		RETURNING challenge`).bind(contact.user_id,contact.oauth_id,contact.subject,contact.email,contact.generation,
-		challenge,digest,contact.user_id,email,env.admin.trim(),contact.oauth_id,contact.subject,contact.email,contact.generation,
-		emailKey,challenge,emailKey,challenge).first()); }
+		challenge,digest,contact.user_id,email,env.admin.trim(),contact.oauth_id,contact.subject,contact.email,contact.oauth_id,contact.oauth_id,contact.subject,contact.email,contact.generation,
+		emailKey,challenge,...internal,emailKey,challenge).first()); }
 	catch (error) { if (error instanceof ReservationBusyError) return generic; throw error; }
 	if (!saved) return generic;
 	try {
@@ -139,15 +204,14 @@ export async function verifyRecoveryCodeForTest(c, input) {
 	const row=await env.db.prepare(`UPDATE account_recovery_email_code SET attempts=attempts+1
 		WHERE user_id=? AND generation=? AND challenge=? AND consumed=0 AND verified_until=0 AND expires_at>unixepoch() AND attempts<5
 		AND EXISTS (SELECT 1 FROM account_recovery_support_ticket t JOIN user u ON u.user_id=t.user_id
-		JOIN account_deletion_request r ON r.user_id=u.user_id JOIN oauth o ON o.user_id=u.user_id AND o.platform='google'
-		JOIN google_verified_contact g ON g.oauth_id=o.oauth_id AND g.subject=o.oauth_user_id
+		JOIN account_deletion_request r ON r.user_id=u.user_id
 		WHERE t.user_id=account_recovery_email_code.user_id AND t.generation=account_recovery_email_code.generation
 		AND t.reference_hash=? AND t.closed=0 AND t.expires_at>unixepoch() AND u.email COLLATE NOCASE=?
 		AND u.email COLLATE NOCASE!=? AND u.is_del=1 AND u.status=0 AND r.state='pending' AND r.purge_after>unixepoch()
-		AND o.oauth_id=account_recovery_email_code.oauth_id AND o.oauth_user_id=account_recovery_email_code.subject
-		AND g.email=account_recovery_email_code.email AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=u.user_id),0)=account_recovery_email_code.generation)
+		AND ${contactMatches('account_recovery_email_code')} AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=u.user_id),0)=account_recovery_email_code.generation)
 		RETURNING oauth_id,subject,email,generation,challenge,code_hash`).bind(contact.user_id,contact.generation,challenge,referenceHash,email,env.admin.trim()).first();
 	if (!row) throw fail();
+	if (row.oauth_id!==contact.oauth_id || row.subject!==contact.subject || row.email!==contact.email || row.generation!==contact.generation) throw fail();
 	const digest=await mac(env.jwt_secret,JSON.stringify(['recovery-email-v1',contact.user_id,row.oauth_id,row.subject,row.email,row.generation,row.challenge,code]));
 	if (!crypto.subtle.timingSafeEqual(encoder.encode(digest),encoder.encode(row.code_hash))) throw fail();
 	const verified=await env.db.prepare(`UPDATE account_recovery_email_code SET
@@ -155,35 +219,38 @@ export async function verifyRecoveryCodeForTest(c, input) {
 		WHERE user_id=? AND challenge=? AND code_hash=? AND consumed=0 AND verified_until=0 AND expires_at>unixepoch() AND attempts<=5
 		AND EXISTS (SELECT 1 FROM account_recovery_support_ticket WHERE user_id=? AND generation=? AND reference_hash=? AND closed=0 AND expires_at>unixepoch())
 		AND EXISTS (SELECT 1 FROM user u JOIN account_deletion_request r ON r.user_id=u.user_id
-		JOIN oauth o ON o.user_id=u.user_id AND o.platform='google' JOIN google_verified_contact g ON g.oauth_id=o.oauth_id AND g.subject=o.oauth_user_id
 		WHERE u.user_id=? AND u.is_del=1 AND u.status=0 AND u.email COLLATE NOCASE!=? AND r.state='pending' AND r.purge_after>unixepoch()
-		AND o.oauth_id=? AND o.oauth_user_id=? AND g.email=? AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=u.user_id),0)=?)
+		AND ${contactMatches('account_recovery_email_code')} AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=u.user_id),0)=?)
 		RETURNING user_id`).bind(contact.user_id,referenceHash,contact.user_id,row.challenge,digest,contact.user_id,row.generation,referenceHash,
-		contact.user_id,env.admin.trim(),row.oauth_id,row.subject,row.email,row.generation).first();
+		contact.user_id,env.admin.trim(),row.generation).first();
 	if (!verified) throw fail();
 	return {verified:true};
 }
 
-// No route exposes this method. Any future caller must enforce support-only
-// authorization and record a durable audit event before enabling production.
-export async function approveRecoveryForTest(env, userId, reference) {
+export async function approveRecoveryForTest(env, userId, reference, actorId, actorGeneration) {
 	checkEnvironment(env);
 	if (!Number.isSafeInteger(userId) || userId<=0 || typeof reference !== 'string' || !/^[0-9a-f]{32}$/.test(reference)) throw fail();
+	await requireSupportAdmin(env,actorId,actorGeneration);
 	const referenceHash=await mac(env.jwt_secret,'recovery-support-reference:'+reference);
+	const targetHash=await mac(env.jwt_secret,'recovery-audit-target:'+userId);
+	const domains=internalDomains(env), placeholders=domains.map(()=>'?').join(',');
 	return withAccountLock(env.db,userId,async()=>{
 		const result=await env.db.batch([
 			env.db.prepare(`UPDATE account_recovery_email_code SET consumed=1 WHERE user_id=? AND consumed=0 AND verified_until>unixepoch() AND reference_hash=?
+				AND instr(email,'@')>1 AND lower(substr(email,instr(email,'@')+1)) NOT IN (${placeholders})
+				AND EXISTS (SELECT 1 FROM user admin WHERE admin.user_id=? AND admin.email COLLATE NOCASE=? AND admin.is_del=0 AND admin.status=0
+				AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=admin.user_id),0)=?)
 				AND EXISTS (SELECT 1 FROM account_recovery_support_ticket WHERE user_id=? AND generation=account_recovery_email_code.generation AND reference_hash=? AND closed=0 AND expires_at>unixepoch())
 				AND EXISTS (SELECT 1 FROM user u JOIN account_deletion_request r ON r.user_id=u.user_id
-				JOIN oauth o ON o.user_id=u.user_id AND o.platform='google' JOIN google_verified_contact g ON g.oauth_id=o.oauth_id AND g.subject=o.oauth_user_id
 				WHERE u.user_id=? AND u.is_del=1 AND u.status=0 AND u.email COLLATE NOCASE!=? AND r.state='pending' AND r.purge_after>unixepoch()
-				AND o.oauth_id=account_recovery_email_code.oauth_id AND o.oauth_user_id=account_recovery_email_code.subject
-				AND g.email=account_recovery_email_code.email AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=u.user_id),0)=account_recovery_email_code.generation)`)
-				.bind(userId,referenceHash,userId,referenceHash,userId,env.admin.trim()),
+				AND ${contactMatches('account_recovery_email_code')} AND COALESCE((SELECT generation FROM account_session_generation WHERE user_id=u.user_id),0)=account_recovery_email_code.generation)`)
+				.bind(userId,referenceHash,...domains,actorId,env.admin.trim(),actorGeneration,userId,referenceHash,userId,env.admin.trim()),
 			env.db.prepare('UPDATE user SET is_del=0 WHERE user_id=? AND is_del=1 AND changes()=1').bind(userId),
 			env.db.prepare("DELETE FROM account_deletion_request WHERE user_id=? AND state='pending' AND changes()=1").bind(userId),
 			env.db.prepare('DELETE FROM account_recovery_email_code WHERE user_id=? AND changes()=1').bind(userId),
 			env.db.prepare('DELETE FROM account_recovery_support_ticket WHERE user_id=? AND changes()=1').bind(userId),
+			env.db.prepare(`INSERT INTO account_recovery_support_audit(actor_user_id,user_id,target_hash,action,created_at)
+				SELECT ?,?,?,'approve',unixepoch() WHERE changes()=1`).bind(actorId,userId,targetHash),
 		]);
 		if (!result.every(item=>item.meta.changes===1)) throw fail();
 		return {restored:true};

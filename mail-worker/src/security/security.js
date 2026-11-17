@@ -93,6 +93,8 @@ const premKey = {
 app.use('*', async (c, next) => {
 
 	const path = c.req.path;
+	// Recovery is unauthenticated only for these exact preview-gated routes.
+	if (path === '/recovery/email/send' || path === '/recovery/email/verify') return next();
 
 	const index = exclude.findIndex(item => {
 		return path.startsWith(item);
@@ -126,6 +128,7 @@ app.use('*', async (c, next) => {
 	if (generation === null || generation !== (result.generation ?? 0)) {
 		throw new BizError(t('authExpired'), 401);
 	}
+	c.set('authGeneration', generation);
 	const authInfo = await c.env.kv.get(KvConst.AUTH_INFO + userId, { type: 'json' });
 
 	if (!authInfo) {

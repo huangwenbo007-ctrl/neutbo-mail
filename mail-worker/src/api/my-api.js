@@ -34,8 +34,9 @@ app.post('/my/delete/request', async (c) => {
 		throw new BizError('请确认删除申请并输入密码');
 	}
 	const now = Math.floor(Date.now() / 1000);
-	const ok = await requestPasswordDeletion(c.env.db, userContext.getUserId(c), body.password, now, c.env.admin);
-	if (!ok) throw new BizError('无法提交申请，请检查密码或稍后再试');
+	const domains=Array.isArray(c.env.domain)?c.env.domain:JSON.parse(c.env.domain);
+	const ok = await requestPasswordDeletion(c.env.db, userContext.getUserId(c), body.password, now, c.env.admin,domains);
+	if (!ok) throw new BizError('无法提交申请，请确认密码正确，且已设置恢复邮箱或绑定 Google 邮箱');
 	return c.json(result.ok({ recoverUntil: now + 2592000 }));
 });
 
