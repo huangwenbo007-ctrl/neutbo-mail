@@ -128,6 +128,10 @@
           <div class="switch" @click="show = 'login'" v-else>{{ $t('hasAccount') }} <span>{{ $t('loginSwitch') }}</span>
           </div>
         </template>
+        <div v-if="recoveryPreviewEnabled" class="public-info-links">
+          <RouterLink to="/about">关于 Neutbo Mail</RouterLink>
+          <RouterLink to="/privacy">隐私说明</RouterLink>
+        </div>
       </div>
     </div>
     <RecoveryDialog v-if="recoveryPreviewEnabled" v-model="recoveryVisible" />
@@ -814,6 +818,18 @@ html.dark .intro-brand img, html.dark .form-brand img { filter: brightness(0) in
 </style>
 
 <style lang="scss" scoped>
+.public-info-links {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  margin-top: 24px;
+  font-size: 13px;
+}
+.public-info-links a {
+  color: #6b7b90;
+  text-decoration: none;
+}
+.public-info-links a:hover { color: #2469c5; }
 
 .form-wrapper {
   position: fixed;

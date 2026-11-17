@@ -63,6 +63,22 @@ const routes = [
         name: 'login',
         component: () => import('@/views/login/index.vue')
     },
+    ...(import.meta.env.VITE_ACCOUNT_DELETION_TEST_ONLY === 'enabled' ? [
+        {
+            path: '/about',
+            name: 'about-preview',
+            component: () => import('@/views/public-info/index.vue'),
+            props: {page: 'about'},
+            meta: {public: true}
+        },
+        {
+            path: '/privacy',
+            name: 'privacy-preview',
+            component: () => import('@/views/public-info/index.vue'),
+            props: {page: 'privacy'},
+            meta: {public: true}
+        }
+    ] : []),
     {
         path: '/test',
         name: 'test',
@@ -103,6 +119,10 @@ router.beforeEach((to, from, next) => {
     }
 
     const token = localStorage.getItem('token')
+
+    if (to.meta.public) {
+        return next()
+    }
 
     if (!token && !to.path.startsWith('/login')) {
         return next({name: 'login'})
