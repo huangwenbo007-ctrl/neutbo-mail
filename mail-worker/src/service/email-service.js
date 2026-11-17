@@ -26,7 +26,11 @@ import telegramService from './telegram-service';
 import webhookService from './webhook-service';
 import forwardMime from '../utils/forward-mime';
 import verifyUtils from '../utils/verify-utils';
-import { withAccountLock, withAccountLocks } from './account-deletion-state';
+import { withAccountLock, withAccountLocks, ReservationBusyError } from './account-deletion-state';
+
+class PendingAccountDeletionError extends BizError {
+	constructor() { super('账号正在等待恢复或清理，无法通过此入口删除邮件'); }
+}
 
 const emailService = {
 
@@ -1206,7 +1210,7 @@ const emailService = {
 		const remove = async () => {
 			for (const userId of userIds) {
 				const request = await c.env.db.prepare('SELECT 1 AS present FROM account_deletion_request WHERE user_id=?').bind(userId).first();
-				if (request) throw new BizError('账号正在等待恢复或清理，无法通过此入口删除邮件');
+				if (request) throw new PendingAccountDeletionError();
 			}
 			await attService.removeByEmailIds(c, emailIds);
 			await starService.removeByEmailIds(c, emailIds);
@@ -1413,18 +1417,21 @@ const emailService = {
 		}
 
 		const batchSize = 95;
+		let lastEmailId = 0;
+		let deferredGroups = 0;
 
 		while (true) {
-			const conditions = [lt(email.createTime, cutoff),
+			const conditions = [lt(email.createTime, cutoff), gt(email.emailId, lastEmailId),
 				sql`NOT EXISTS (SELECT 1 FROM account_deletion_request WHERE user_id = ${email.userId})`];
 			if (excludeUserIds.length) {
 				conditions.push(notInArray(email.userId, excludeUserIds));
 			}
 
 			const rows = await orm(c)
-				.select({ emailId: email.emailId })
+				.select({ emailId: email.emailId, userId: email.userId })
 				.from(email)
 				.where(and(...conditions))
+				.orderBy(asc(email.emailId))
 				.limit(batchSize)
 				.all();
 
@@ -1432,13 +1439,28 @@ const emailService = {
 				break;
 			}
 
-			const emailIds = rows.map(row => row.emailId);
-			await this.physicsDelete(c, { emailIds: emailIds.join(',') });
+			lastEmailId = rows[rows.length - 1].emailId;
+			const groups = new Map();
+			for (const row of rows) {
+				if (!groups.has(row.userId)) groups.set(row.userId, []);
+				groups.get(row.userId).push(row.emailId);
+			}
+			for (const ids of groups.values()) {
+				try {
+					await this.physicsDelete(c, { emailIds: ids.join(',') });
+				} catch (error) {
+					// A reservation conflict or a just-requested deletion leaves
+					// this account untouched for the next scheduled pass.
+					if (!(error instanceof ReservationBusyError) && !(error instanceof PendingAccountDeletionError)) throw error;
+					deferredGroups++;
+				}
+			}
 
 			if (rows.length < batchSize) {
 				break;
 			}
 		}
+		if (deferredGroups) console.warn('Scheduled mail cleanup deferred account groups', { count: deferredGroups });
 	},
 
 	async batchDelete(c, params) {

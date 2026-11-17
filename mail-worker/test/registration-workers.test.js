@@ -372,6 +372,48 @@ it('preserves pending-account mail against scheduled and privileged deletion pat
   expect((await env.db.prepare('SELECT count(*) AS n FROM account WHERE account_id=?').bind(pending.account_id).first()).n).toBe(1);
 });
 
+it('continues scheduled cleanup for other accounts when one account lock is busy', async () => {
+  for (const name of ['cleanup-busy','cleanup-free']) {
+    const verified=await proof(`${name}@external.test`);
+    expect((await post('/register',{email:`${name}@example.com`,password:'test-password',...verified})).code).toBe(200);
+  }
+  const getAccount=async name=>env.db.prepare('SELECT u.user_id,a.account_id FROM user u JOIN account a ON a.user_id=u.user_id WHERE u.email=?').bind(`${name}@example.com`).first();
+  const busy=await getAccount('cleanup-busy'), free=await getAccount('cleanup-free');
+  await env.db.batch(Array.from({length:95},()=>env.db.prepare("INSERT INTO email(user_id,account_id,subject,create_time) VALUES(?,?,'cleanup contention','2000-01-01 00:00:00')").bind(busy.user_id,busy.account_id)));
+  await env.db.prepare("INSERT INTO email(user_id,account_id,subject,create_time) VALUES(?,?,'cleanup contention','2000-01-01 00:00:00')").bind(free.user_id,free.account_id).run();
+  await env.db.prepare('UPDATE setting SET auto_clean_days=1').run();
+  await refresh();
+  const key=`internal/account/${busy.user_id}`;
+  expect(await acquireObjectLock(env.db,'KV',key,'busy-holder',100)).toBe(true);
+  await emailService.autoClean({env});
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(busy.user_id).first()).n).toBe(95);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(free.user_id).first()).n).toBe(0);
+  expect(await releaseObjectLock(env.db,'KV',key,'busy-holder')).toBe(true);
+  await emailService.autoClean({env});
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(busy.user_id).first()).n).toBe(0);
+});
+
+it('preserves mail when deletion is requested during a scheduled cleanup batch', async () => {
+  for (const name of ['cleanup-transition','cleanup-untouched']) {
+    const verified=await proof(`${name}@external.test`);
+    expect((await post('/register',{email:`${name}@example.com`,password:'test-password',...verified})).code).toBe(200);
+  }
+  const getAccount=async name=>env.db.prepare('SELECT u.user_id,a.account_id FROM user u JOIN account a ON a.user_id=u.user_id WHERE u.email=?').bind(`${name}@example.com`).first();
+  const pending=await getAccount('cleanup-transition'), other=await getAccount('cleanup-untouched');
+  for (const user of [pending,other]) await env.db.prepare("INSERT INTO email(user_id,account_id,subject,create_time) VALUES(?,?,'cleanup transition','2000-01-01 00:00:00')").bind(user.user_id,user.account_id).run();
+  await env.db.prepare('UPDATE setting SET auto_clean_days=1').run();
+  await refresh();
+  const original=emailService.physicsDelete.bind(emailService);
+  let requested=false;
+  const spy=vi.spyOn(emailService,'physicsDelete').mockImplementation(async (c,params)=>{
+    if (!requested) {requested=true;expect(await requestDeletion(env.db,pending.user_id,Math.floor(Date.now()/1000))).toBe(true);}
+    return original(c,params);
+  });
+  try { await emailService.autoClean({env}); } finally { spy.mockRestore(); }
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(pending.user_id).first()).n).toBe(1);
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(other.user_id).first()).n).toBe(0);
+});
+
 it('removes more than one D1 parameter batch of matching mail', async () => {
   await env.db.batch(Array.from({length: 110}, () => env.db.prepare("INSERT INTO email(user_id,account_id,subject) VALUES (1,1,'bulk-limit-test')")));
   await emailService.batchDelete({env},{subject:'bulk-limit-test',type:'include'});

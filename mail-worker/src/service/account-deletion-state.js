@@ -97,6 +97,13 @@ export async function releaseObjectLock(db, storageType, key, owner) {
 
 // Prototype: reserve all unique keys in a deterministic order before a writer
 // starts. Contention fails closed and acquired locks are released on failure.
+export class ReservationBusyError extends Error {
+	constructor() {
+		super('Attachment temporarily busy');
+		this.name = 'ReservationBusyError';
+	}
+}
+
 export async function withObjectLocks(db, storageType, keys, owner, now, operation, options = {}) {
 	const uniqueKeys = [...new Set(keys)].sort();
 	const acquired = [];
@@ -107,7 +114,7 @@ export async function withObjectLocks(db, storageType, keys, owner, now, operati
 	try {
 		for (const key of uniqueKeys) {
 			while (!await acquireObjectLock(db, storageType, key, owner, now)) {
-				if (retries-- <= 0) throw new Error('Attachment temporarily busy');
+				if (retries-- <= 0) throw new ReservationBusyError();
 				await new Promise(resolve => setTimeout(resolve, delayMs));
 			}
 			acquired.push(key);
