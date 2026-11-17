@@ -5,6 +5,19 @@ const { DatabaseSync } = require('node:sqlite');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 
+test('isolated cleanup status migration is repeatable and retains failures', () => {
+  const db = new DatabaseSync(':memory:');
+  const migration = readFileSync(join(__dirname, '../migrations/account-deletion-cleanup-test.sql'), 'utf8');
+  db.exec(migration);
+  db.exec("INSERT INTO account_deletion_cleanup_job VALUES (1,'retry',2,100,200,'stage_failed')");
+  db.exec("INSERT INTO account_deletion_cleanup_object_status VALUES (1,'KV','attachments/test','shared',1,100,200,'shared')");
+  db.exec(migration);
+  assert.equal(db.prepare('SELECT attempts FROM account_deletion_cleanup_job WHERE user_id=1').get().attempts, 2);
+  assert.equal(db.prepare('SELECT state FROM account_deletion_cleanup_object_status WHERE user_id=1').get().state, 'shared');
+  assert.throws(() => db.exec("INSERT INTO account_deletion_cleanup_job VALUES (2,'invalid',0,0,0,'')"));
+  db.close();
+});
+
 test('migration can be repeated without changing existing mailbox data', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE TABLE user (user_id INTEGER PRIMARY KEY, email TEXT NOT NULL);

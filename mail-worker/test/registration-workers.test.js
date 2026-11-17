@@ -18,6 +18,7 @@ import { acquireObjectLock, releaseObjectLock } from '../src/service/account-del
 import { processTestKvAttachment } from '../src/service/attachment-cleanup-draft';
 import cryptoUtils from '../src/utils/crypto-utils';
 import { stageDueDeletionsForTest } from '../src/service/account-deletion-runner-draft';
+import { runIsolatedCleanupBatch, isolatedCleanupSummary, runIsolatedScheduledCleanup } from '../src/service/account-deletion-cleanup-test';
 import { createSupportTicketForTest as createSupportTicketImpl, sendRecoveryCodeForTest, verifyRecoveryCodeForTest, approveRecoveryForTest as approveRecoveryImpl, cleanupRecoveryProofsForTest } from '../src/service/account-recovery-email-draft';
 
 const requestDeletion = (db, userId, now) => requestDeletionRaw(db, userId, now, 'admin@example.com');
@@ -60,6 +61,65 @@ async function proof(address = 'receiver@external.test') {
   expect(result.code).toBe(200);
   return {externalEmail:address, emailChallenge:result.data.challenge, emailVerificationCode:sentCode};
 }
+
+it('tracks and retries isolated cleanup without deleting shared or unknown attachments', async () => {
+  await env.db.prepare(`CREATE TABLE account_deletion_cleanup_job (
+    user_id INTEGER PRIMARY KEY, state TEXT NOT NULL, attempts INTEGER NOT NULL,
+    last_attempt_at INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL, reason TEXT NOT NULL)`).run();
+  await env.db.prepare(`CREATE TABLE account_deletion_cleanup_object_status (
+    user_id INTEGER NOT NULL, storage_type TEXT NOT NULL, object_key TEXT NOT NULL, state TEXT NOT NULL,
+    attempts INTEGER NOT NULL, last_attempt_at INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL, reason TEXT NOT NULL,
+    PRIMARY KEY(user_id,storage_type,object_key))`).run();
+  for (const name of ['cleanup-owner','cleanup-other','cleanup-later']) {
+    const verified=await proof(`${name}@external.test`);
+    expect((await post('/register',{email:`${name}@example.com`,password:'test-password',...verified})).code).toBe(200);
+  }
+  const account = async name => env.db.prepare('SELECT u.user_id,a.account_id FROM user u JOIN account a ON a.user_id=u.user_id WHERE u.email=?').bind(`${name}@example.com`).first();
+  const owner=await account('cleanup-owner'), other=await account('cleanup-other'), later=await account('cleanup-later');
+  const mail = async person => env.db.prepare('INSERT INTO email(user_id,account_id,subject) VALUES(?,?,?) RETURNING email_id').bind(person.user_id,person.account_id,'cleanup test').first();
+  const ownerMail=await mail(owner), otherMail=await mail(other);
+  const shared='attachments/cleanup-shared', own='attachments/cleanup-own', unknown='attachments/cleanup-unknown';
+  const record=(person,message,key)=>({key,userId:person.user_id,accountId:person.account_id,emailId:message.email_id,filename:'test.txt',mimeType:'text/plain',content:new TextEncoder().encode(key)});
+  await attService.addAtt({env},[record(owner,ownerMail,shared),record(owner,ownerMail,own),record(owner,ownerMail,unknown)]);
+  await attService.addAtt({env},[record(other,otherMail,shared)]);
+  await env.db.prepare('DELETE FROM attachment_object_origin WHERE object_key=?').bind(unknown).run();
+  const now=Math.floor(Date.now()/1000);
+  expect(await requestDeletion(env.db,owner.user_id,now-30*86400-1)).toBe(true);
+  expect(await requestDeletion(env.db,later.user_id,now)).toBe(true);
+  expect(await runIsolatedScheduledCleanup({})).toBeNull();
+  await expect(runIsolatedScheduledCleanup({account_deletion_scheduled_test_only:'enabled'})).rejects.toThrow('restricted');
+  await expect(runIsolatedCleanupBatch({...env,account_deletion_test_only:'disabled'})).rejects.toThrow('restricted');
+  const lock=`internal/account/${owner.user_id}`;
+  expect(await acquireObjectLock(env.db,'KV',lock,'blocked-owner',now)).toBe(true);
+  const blocked=await runIsolatedCleanupBatch(env);
+  expect(blocked.accountRetry).toBe(1);
+  expect((await env.db.prepare('SELECT reason FROM account_deletion_cleanup_job WHERE user_id=?').bind(owner.user_id).first()).reason).toBe('stage_failed');
+  await releaseObjectLock(env.db,'KV',lock,'blocked-owner');
+  await env.db.prepare('UPDATE account_deletion_cleanup_job SET next_attempt_at=0 WHERE user_id=?').bind(owner.user_id).run();
+  const brokenEnv={...env,kv:{delete:async()=>{throw new Error('private provider error');}}};
+  const first=await runIsolatedCleanupBatch(brokenEnv);
+  expect(first).toMatchObject({staged:1,shared:1,unresolved:1,objectRetry:1});
+  expect(await env.kv.get(shared)).not.toBeNull();
+  expect(await env.kv.get(own)).not.toBeNull();
+  expect(await env.kv.get(unknown)).not.toBeNull();
+  expect(await env.db.prepare('SELECT user_id FROM user WHERE user_id=?').bind(later.user_id).first()).toBeTruthy();
+  const status=await env.db.prepare('SELECT state,reason,attempts FROM account_deletion_cleanup_object_status WHERE object_key=?').bind(own).first();
+  expect(status).toMatchObject({state:'retry',reason:'storage_error',attempts:1});
+  const summary=await isolatedCleanupSummary(env);
+  expect(summary.objects).toEqual(expect.arrayContaining([{state:'retry',count:1},{state:'shared',count:1},{state:'unresolved',count:1}]));
+  expect((await runIsolatedCleanupBatch(env)).deleted).toBe(0); // backoff is durable
+  await env.db.prepare('UPDATE account_deletion_cleanup_object_status SET next_attempt_at=0').run();
+  const retried=await runIsolatedScheduledCleanup({...env,account_deletion_scheduled_test_only:'enabled'});
+  expect(retried).toMatchObject({deleted:1,shared:1,unresolved:1});
+  expect(await env.kv.get(own)).toBeNull();
+  expect(await env.kv.get(shared)).not.toBeNull();
+  expect(await env.kv.get(unknown)).not.toBeNull();
+  await env.db.prepare('DELETE FROM attachments WHERE user_id=? AND key=?').bind(other.user_id,shared).run();
+  await env.db.prepare('UPDATE account_deletion_cleanup_object_status SET next_attempt_at=0').run();
+  expect(await runIsolatedCleanupBatch(env)).toMatchObject({deleted:1,unresolved:1});
+  expect(await env.kv.get(shared)).toBeNull();
+  expect(await env.kv.get(unknown)).not.toBeNull();
+});
 
 it('verifies Google reauthentication signatures and rejects invalid identity claims', async () => {
   const algorithm = {name:'RSASSA-PKCS1-v1_5', modulusLength:2048, publicExponent:new Uint8Array([1,0,1]), hash:'SHA-256'};

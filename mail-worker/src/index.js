@@ -8,6 +8,7 @@ import oauthService from './service/oauth-service';
 import analysisService from './service/analysis-service';
 import registrationEmailService from './service/registration-email-service';
 import { hasAttachmentReference } from './service/attachment-access';
+import { runIsolatedScheduledCleanup, isolatedCleanupSummary } from './service/account-deletion-cleanup-test';
 export default {
 	 async fetch(req, env, ctx) {
 
@@ -41,6 +42,15 @@ export default {
 	},
 	email: email,
 	async scheduled(c, env, ctx) {
+		if (c.cron === '0 * * * *' && env.account_deletion_scheduled_test_only === 'enabled') {
+			ctx.waitUntil(runIsolatedScheduledCleanup(env).then(async result => {
+				const backlog = await isolatedCleanupSummary(env);
+				console.log(JSON.stringify({event:'isolated_account_cleanup', result, backlog}));
+			}).catch(() => {
+				console.error('isolated_account_cleanup_failed');
+				throw new Error('Isolated account cleanup failed');
+			}));
+		}
 		if (c.cron === '*/30 * * * *') {
 			await analysisService.refreshEchartsCache({ env })
 			return;
