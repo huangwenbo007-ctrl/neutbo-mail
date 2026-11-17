@@ -1378,18 +1378,20 @@ const emailService = {
 	},
 
 	async completeReceiveAll(c) {
-		// 用 EXISTS 走 status=6 部分索引 + account 主键；避免 IN (SELECT account_id FROM account) 触发全盘扫描
-		await c.env.db.prepare(
-			`UPDATE email
-			 SET status = ${emailConst.status.RECEIVE}
-			 WHERE status = ${emailConst.status.SAVING}
-			   AND EXISTS (SELECT 1 FROM account WHERE account.account_id = email.account_id)`
-		).run();
-		await c.env.db.prepare(
-			`UPDATE email
-			 SET status = ${emailConst.status.NOONE}
-			 WHERE status = ${emailConst.status.SAVING}`
-		).run();
+		// A SAVING row may still be in flight, or may lack attachments after a
+		// crash. Never claim it is complete without proof; leave it unchanged.
+		const row = await c.env.db.prepare(`SELECT count(*) AS count FROM email
+			WHERE status = ? AND create_time <= datetime('now', '-15 minutes')`)
+			.bind(emailConst.status.SAVING).first();
+		if (row.count) console.error(JSON.stringify({event:'inbound_stalled_messages', count:row.count}));
+		if (c.env.account_deletion_test_only === 'enabled') {
+			const locks = await c.env.db.prepare(`SELECT count(*) AS count FROM attachment_object_lock
+				WHERE created_at <= unixepoch() - 900 AND (object_key LIKE 'internal/account/%' OR object_key LIKE 'attachments/%')`).bind().first();
+			// Expiring a lock can race a still-running writer. Report it, never
+			// release it automatically without a proper fencing protocol.
+			if (locks.count) console.error(JSON.stringify({event:'inbound_stale_reservations', count:locks.count}));
+		}
+		return row.count;
 	},
 
 	async autoClean(c) {

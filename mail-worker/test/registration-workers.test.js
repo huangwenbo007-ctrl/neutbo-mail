@@ -9,6 +9,8 @@ import accountService from '../src/service/account-service';
 import { email as receiveEmail } from '../src/email/email';
 import attService from '../src/service/att-service';
 import emailService from '../src/service/email-service';
+import telegramService from '../src/service/telegram-service';
+import webhookService from '../src/service/webhook-service';
 import fileUtils from '../src/utils/file-utils';
 import app from '../src/hono/webs';
 import { checkPasswordReauth, requestPasswordDeletion, changePasswordWithReauth } from '../src/service/account-reauth-draft';
@@ -1171,7 +1173,9 @@ it('does not save incoming mail while the recipient account is being changed', a
     const bytes = new TextEncoder().encode('From: sender@external.test\r\nTo: locked@example.com\r\nSubject: Test\r\n\r\nHello');
     return {from:'sender@external.test', to:'locked@example.com', raw:new ReadableStream({start(controller) {controller.enqueue(bytes); controller.close();}}), setReject() {}};
   };
-  await expect(receiveEmail(makeMessage(), env, {})).rejects.toThrow('Attachment temporarily busy');
+  for (let attempt=0; attempt<3; attempt++) {
+    await expect(receiveEmail(makeMessage(), env, {})).rejects.toThrow('Attachment temporarily busy');
+  }
   expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
   expect(await releaseObjectLock(env.db, 'KV', key, 'account-change')).toBe(true);
   await receiveEmail(makeMessage(), env, {});
@@ -1195,6 +1199,65 @@ it('accepts one incoming message after a short account lock clears', async () =>
   await delivery;
   expect(rejected).toBeNull();
   expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(user.user_id).first()).n).toBe(1);
+});
+
+it('does not report a completed delivery as failed when releasing its account lock fails', async () => {
+  const verified=await proof('release-failure@external.test');
+  expect((await post('/register',{email:'release-failure@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='release-failure@example.com'").first();
+  await env.db.prepare('UPDATE setting SET receive=0').run(); await refresh();
+  const key=`internal/account/${user.user_id}`;
+  const db={
+    prepare(sql) {
+      const statement=env.db.prepare(sql);
+      if (!sql.includes('DELETE FROM attachment_object_lock')) return statement;
+      return {bind(...args) {
+        if (args[1] === key) return {async run(){throw new Error('simulated lock release failure');}};
+        return statement.bind(...args);
+      }};
+    },
+    batch(statements){return env.db.batch(statements);},
+  };
+  const bytes=new TextEncoder().encode('From: sender@external.test\r\nTo: release-failure@example.com\r\nSubject: release failure\r\n\r\nHello');
+  let rejected=null;
+  const log=vi.spyOn(console,'error').mockImplementation(()=>{});
+  try {
+    await receiveEmail({from:'sender@external.test',to:'release-failure@example.com',
+      raw:new ReadableStream({start(c){c.enqueue(bytes);c.close();}}),setReject(reason){rejected=reason;}},{...env,db},{});
+    expect(rejected).toBeNull();
+    expect(log).toHaveBeenCalledWith('inbound_account_reservation_release_failed_after_save');
+    expect((await env.db.prepare("SELECT count(*) AS n FROM email WHERE user_id=? AND subject='release failure' AND status=0 AND is_del=0").bind(user.user_id).first()).n).toBe(1);
+    const lock=await env.db.prepare('SELECT owner_token FROM attachment_object_lock WHERE object_key=?').bind(key).first();
+    expect(lock).toBeTruthy();
+    expect(await releaseObjectLock(env.db,'KV',key,lock.owner_token)).toBe(true);
+  } finally {log.mockRestore();}
+});
+
+it('keeps a saved message when optional notifications fail and forwards to configured destinations', async () => {
+  const verified=await proof('notifications-owner@external.test');
+  expect((await post('/register',{email:'notifications@example.com',password:'test-password',...verified})).code).toBe(200);
+  await env.db.prepare(`UPDATE setting SET receive=0,tg_bot_status=0,tg_chat_id='test',
+    forward_status=0,forward_email='first@external.test, second@external.test',
+    webhook_status=0,webhook_url='https://notification.example.test'`).run();
+  await refresh();
+  const telegram=vi.spyOn(telegramService,'sendEmailToBot').mockRejectedValue(new Error('telegram unavailable'));
+  const webhook=vi.spyOn(webhookService,'sendEmail').mockRejectedValue(new Error('webhook unavailable'));
+  const log=vi.spyOn(console,'error').mockImplementation(()=>{});
+  const forwarded=[];
+  let rejected=null;
+  try {
+    const bytes=new TextEncoder().encode('From: sender@external.test\r\nTo: notifications@example.com\r\nSubject: notification failure\r\n\r\nHello');
+    await receiveEmail({from:'sender@external.test',to:'notifications@example.com',
+      raw:new ReadableStream({start(c){c.enqueue(bytes);c.close();}}),setReject(reason){rejected=reason;},
+      async forward(destination){forwarded.push(destination);}},env,{});
+    expect(rejected).toBeNull();
+    expect(forwarded).toEqual(['first@external.test','second@external.test']);
+    expect(telegram).toHaveBeenCalledOnce();
+    expect(webhook).toHaveBeenCalledOnce();
+    expect((await env.db.prepare("SELECT count(*) AS n FROM email WHERE subject='notification failure' AND status=0 AND is_del=0").first()).n).toBe(1);
+    expect(log).toHaveBeenCalledWith('inbound_telegram_notification_failed');
+    expect(log).toHaveBeenCalledWith('inbound_webhook_notification_failed');
+  } finally {telegram.mockRestore();webhook.mockRestore();log.mockRestore();}
 });
 
 it('does not deliver on-site mail to a recipient awaiting deletion', async () => {
@@ -1344,7 +1407,7 @@ it('keeps a new shared KV attachment until its final reference is removed', asyn
     .rejects.toThrow('Isolated KV cleanup is not configured');
 });
 
-it('rejects incoming mail and retains failure details if its attachment cannot be saved', async () => {
+it('fails incoming mail temporarily and retains details if its attachment cannot be saved', async () => {
   const verified = await proof('attachment-owner@external.test');
   expect((await post('/register', {email:'receiver@example.com', password:'test-password', ...verified})).code).toBe(200);
   await env.db.prepare('UPDATE setting SET receive=0').run();
@@ -1360,8 +1423,8 @@ it('rejects incoming mail and retains failure details if its attachment cannot b
   let rejected = null;
   const bytes = new TextEncoder().encode(raw);
   const message = {from:'sender@external.test', to:'receiver@example.com', raw:new ReadableStream({start(controller) {controller.enqueue(bytes); controller.close();}}), setReject(reason) {rejected = reason;}};
-  await receiveEmail(message, env, {});
-  expect(rejected).toBe('Unable to save attachment; please resend');
+  await expect(receiveEmail(message, env, {})).rejects.toThrow('Attachment temporarily busy');
+  expect(rejected).toBeNull();
   const row = await env.db.prepare("SELECT email_id,status,is_del FROM email WHERE subject='attachment test'").first();
   expect(row.status).toBe(8);
   expect(row.is_del).toBe(1);
@@ -1370,6 +1433,41 @@ it('rejects incoming mail and retains failure details if its attachment cannot b
   await emailService.completeReceiveAll({env});
   expect((await env.db.prepare('SELECT status,is_del FROM email WHERE email_id=?').bind(row.email_id).first())).toMatchObject({status:8,is_del:1});
   expect(await releaseObjectLock(env.db, 'KV', key, 'test-cleaner')).toBe(true);
+  // Simulate a sender retry after the lock clears. The failure remains hidden,
+  // and only the second, complete delivery appears in the mailbox.
+  await receiveEmail({from:'sender@external.test',to:'receiver@example.com',
+    raw:new ReadableStream({start(controller){controller.enqueue(bytes);controller.close();}}),
+    setReject(reason){rejected=reason;}},env,{});
+  const delivered=await env.db.prepare("SELECT email_id FROM email WHERE subject='attachment test' AND status=0 AND is_del=0").all();
+  expect(delivered.results).toHaveLength(1);
+  expect(await env.kv.get(key)).toBe('abc');
+  expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE email_id=? AND key=?').bind(delivered.results[0].email_id,key).first()).n).toBe(1);
+});
+
+it('reports stalled incoming messages without declaring incomplete or in-flight messages delivered', async () => {
+  await env.db.prepare(`INSERT INTO email(user_id,account_id,subject,status,is_del,create_time)
+    VALUES (1,1,'stalled-receive',6,1,datetime('now','-1 hour')),
+           (1,1,'active-receive',6,1,datetime('now')),
+           (1,1,'failed-receive',8,1,datetime('now','-1 hour')),
+           (1,1,'finished-receive',0,0,datetime('now','-1 hour'))`).run();
+  const now=Math.floor(Date.now()/1000);
+  expect(await acquireObjectLock(env.db,'KV','internal/account/1','stalled-writer',now-3600)).toBe(true);
+  expect(await acquireObjectLock(env.db,'KV','attachments/live','active-writer',now)).toBe(true);
+  const log=vi.spyOn(console,'error').mockImplementation(()=>{});
+  try {
+    expect(await emailService.completeReceiveAll({env})).toBe(1);
+    expect(log).toHaveBeenCalledWith(JSON.stringify({event:'inbound_stalled_messages',count:1}));
+    expect(log).toHaveBeenCalledWith(JSON.stringify({event:'inbound_stale_reservations',count:1}));
+    expect((await env.db.prepare("SELECT count(*) AS n FROM attachment_object_lock WHERE owner_token='stalled-writer'").first()).n).toBe(1);
+    const rows=await env.db.prepare(`SELECT subject,status,is_del FROM email
+      WHERE subject IN ('stalled-receive','active-receive','failed-receive','finished-receive') ORDER BY subject`).all();
+    expect(rows.results).toEqual([
+      {subject:'active-receive',status:6,is_del:1},
+      {subject:'failed-receive',status:8,is_del:1},
+      {subject:'finished-receive',status:0,is_del:0},
+      {subject:'stalled-receive',status:6,is_del:1},
+    ]);
+  } finally {log.mockRestore();}
 });
 
 it('receives a complete message and attachment when storage succeeds', async () => {

@@ -147,6 +147,7 @@ export async function email(message, env, ctx) {
 			}
 		}
 
+		let completedEmail;
 		const saveMessage = async () => {
 			if (account) {
 				const currentUser = await userService.selectByIdIncludeDel({ env }, account.userId);
@@ -169,7 +170,7 @@ export async function email(message, env, ctx) {
 					await attService.addAtt({ env }, attachments, { retries: 4, delayMs: 100 });
 				}
 			} catch (e) {
-				// Reject the delivery rather than reporting success with missing attachments.
+				// Fail delivery rather than reporting success with missing attachments.
 				// Keep the failed message and attempted object keys for investigation; do
 				// not delete objects here because another message may reference them.
 				try {
@@ -184,24 +185,34 @@ export async function email(message, env, ctx) {
 				} catch (recordError) {
 					console.error('Failed to record inbound attachment error');
 				}
-				message.setReject('Unable to save attachment; please resend');
-				return null;
+				// setReject is permanent. Propagate a processing failure so the SMTP
+				// peer can see a temporary failure and decide whether to retry.
+				throw e;
 			}
 
-			emailRow = await emailService.completeReceive({ env }, account ? emailConst.status.RECEIVE : emailConst.status.NOONE, emailRow.emailId);
-			return emailRow;
+			completedEmail = await emailService.completeReceive({ env }, account ? emailConst.status.RECEIVE : emailConst.status.NOONE, emailRow.emailId);
+			return completedEmail;
 		};
 		// The same lock is used by the deletion prototype. Do not send or forward
 		// messages while holding it; only coordinate the account's own writes.
-		const emailRow = account
-			? await withAccountLock(env.db, account.userId, saveMessage, { retries: 4, delayMs: 100 })
-			: await saveMessage();
+		let emailRow;
+		try {
+			emailRow = account
+				? await withAccountLock(env.db, account.userId, saveMessage, { retries: 4, delayMs: 100 })
+				: await saveMessage();
+		} catch (error) {
+			if (!completedEmail) throw error;
+			// The message is already complete. A failed lock release must be
+			// investigated, but reporting delivery failure could duplicate it.
+			console.error('inbound_account_reservation_release_failed_after_save');
+			emailRow = completedEmail;
+		}
 		if (!emailRow) return;
 
 
 		if (ruleType === settingConst.ruleType.RULE) {
 
-			const emails = ruleEmail.split(',');
+			const emails = String(ruleEmail || '').split(',');
 
 			if (!emails.includes(message.to)) {
 				return;
@@ -211,7 +222,11 @@ export async function email(message, env, ctx) {
 
 		//转发到TG
 		if (tgBotStatus === settingConst.tgBotStatus.OPEN && tgChatId) {
-			await telegramService.sendEmailToBot({ env }, emailRow)
+			try {
+				await telegramService.sendEmailToBot({ env }, emailRow);
+			} catch {
+				console.error('inbound_telegram_notification_failed');
+			}
 		}
 
 		//转发到其他邮箱
@@ -219,7 +234,8 @@ export async function email(message, env, ctx) {
 
 			const emails = forwardEmail.split(',');
 
-			await Promise.all(emails.map(async email => {
+			const destinations = forwardEmail.split(',').map(value => value.trim()).filter(Boolean);
+			await Promise.all(destinations.map(async email => {
 
 				try {
 					await message.forward(email);
@@ -233,7 +249,11 @@ export async function email(message, env, ctx) {
 
 		//转发到 Webhook
 		if (webhookStatus === settingConst.webhookStatus.OPEN && webhookUrl) {
-			await webhookService.sendEmail({ env }, emailRow, webhookUrl, webhookRetry, webhookSecret);
+			try {
+				await webhookService.sendEmail({ env }, emailRow, webhookUrl, webhookRetry, webhookSecret);
+			} catch {
+				console.error('inbound_webhook_notification_failed');
+			}
 		}
 
 	} catch (e) {
