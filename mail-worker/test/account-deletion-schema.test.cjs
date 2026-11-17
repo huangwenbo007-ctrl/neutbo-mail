@@ -69,6 +69,30 @@ test('a writer reserves all attachment keys or performs no write', async () => {
   raw.close();
 });
 
+test('bounded lock retries wait only for acquisition and never repeat a write', async () => {
+  const { acquireObjectLock, releaseObjectLock, withObjectLocks } = await import('../src/service/account-deletion-state.js');
+  const raw = new DatabaseSync(':memory:');
+  raw.exec(readFileSync(join(__dirname, '../migrations/account-deletion-draft.sql'), 'utf8'));
+  const db = {prepare(sql) {return {bind(...args) {return {async run() {return {meta:{changes:Number(raw.prepare(sql).run(...args).changes)}};}};}};}};
+  assert.equal(await acquireObjectLock(db,'KV','z-shared','holder',10),true);
+  let writes=0;
+  const waiting=withObjectLocks(db,'KV',['a-first','z-shared'],'writer',11,async()=>++writes,{retries:4,delayMs:30});
+  await new Promise(resolve=>setTimeout(resolve,45));
+  assert.equal(writes,0);
+  assert.equal(await releaseObjectLock(db,'KV','z-shared','holder'),true);
+  assert.equal(await waiting,1);
+  assert.equal(writes,1);
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM attachment_object_lock').get().n,0);
+  await assert.rejects(withObjectLocks(db,'KV',['a-first'],'writer',12,async()=>{writes++;throw new Error('Attachment temporarily busy')},{retries:4,delayMs:1}),/busy/);
+  assert.equal(writes,2); // A failure after the write started must never be retried.
+  assert.equal(await acquireObjectLock(db,'KV','z-shared','holder',13),true);
+  await assert.rejects(withObjectLocks(db,'KV',['a-first','z-shared'],'writer',14,async()=>{writes++},{retries:1,delayMs:1}),/busy/);
+  assert.equal(writes,2);
+  assert.equal(raw.prepare("SELECT count(*) AS n FROM attachment_object_lock WHERE object_key='a-first'").get().n,0);
+  assert.equal(await releaseObjectLock(db,'KV','z-shared','holder'),true);
+  raw.close();
+});
+
 test('keeps shared objects and retries failed unshared object deletion', async () => {
   const { processQueuedObject, acquireObjectLock, releaseObjectLock, recordConfirmedObjectOrigin } = await import('../src/service/account-deletion-state.js');
   const raw = new DatabaseSync(':memory:');

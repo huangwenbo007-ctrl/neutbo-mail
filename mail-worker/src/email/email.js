@@ -166,7 +166,7 @@ export async function email(message, env, ctx) {
 
 			try {
 				if (attachments.length > 0) {
-					await attService.addAtt({ env }, attachments);
+					await attService.addAtt({ env }, attachments, { retries: 4, delayMs: 100 });
 				}
 			} catch (e) {
 				// Reject the delivery rather than reporting success with missing attachments.
@@ -194,7 +194,7 @@ export async function email(message, env, ctx) {
 		// The same lock is used by the deletion prototype. Do not send or forward
 		// messages while holding it; only coordinate the account's own writes.
 		const emailRow = account
-			? await withAccountLock(env.db, account.userId, saveMessage)
+			? await withAccountLock(env.db, account.userId, saveMessage, { retries: 4, delayMs: 100 })
 			: await saveMessage();
 		if (!emailRow) return;
 

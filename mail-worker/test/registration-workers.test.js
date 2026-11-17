@@ -643,6 +643,25 @@ it('does not save incoming mail while the recipient account is being changed', a
   expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(user.user_id).first()).n).toBe(1);
 });
 
+it('accepts one incoming message after a short account lock clears', async () => {
+  const verified=await proof('brief-lock@external.test');
+  expect((await post('/register',{email:'brief-lock@example.com',password:'test-password',...verified})).code).toBe(200);
+  const user=await env.db.prepare("SELECT user_id FROM user WHERE email='brief-lock@example.com'").first();
+  await env.db.prepare('UPDATE setting SET receive=0').run();
+  await refresh();
+  const key=`internal/account/${user.user_id}`;
+  expect(await acquireObjectLock(env.db,'KV',key,'brief-holder',100)).toBe(true);
+  let rejected=null;
+  const bytes=new TextEncoder().encode('From: sender@external.test\r\nTo: brief-lock@example.com\r\nSubject: brief lock\r\n\r\nHello');
+  const delivery=receiveEmail({from:'sender@external.test',to:'brief-lock@example.com',raw:new ReadableStream({start(c){c.enqueue(bytes);c.close()}}),setReject(reason){rejected=reason}},env,{});
+  await new Promise(resolve=>setTimeout(resolve,120));
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(user.user_id).first()).n).toBe(0);
+  expect(await releaseObjectLock(env.db,'KV',key,'brief-holder')).toBe(true);
+  await delivery;
+  expect(rejected).toBeNull();
+  expect((await env.db.prepare('SELECT count(*) AS n FROM email WHERE user_id=?').bind(user.user_id).first()).n).toBe(1);
+});
+
 it('does not deliver on-site mail to a recipient awaiting deletion', async () => {
   const senderProof = await proof('onsite-sender@external.test');
   expect((await post('/register', {email:'sender@example.com', password:'test-password', ...senderProof})).code).toBe(200);
@@ -837,6 +856,33 @@ it('receives a complete message and attachment when storage succeeds', async () 
   expect(row).toMatchObject({status:0,is_del:0});
   const attachment = await env.db.prepare('SELECT key FROM attachments WHERE email_id=?').bind(row.email_id).first();
   expect(await env.kv.get(attachment.key)).toBe('abc');
+});
+
+it('receives one complete attachment after a short object lock clears', async () => {
+  const verified=await proof('brief-attachment-lock@external.test');
+  expect((await post('/register',{email:'brief-attachment@example.com',password:'test-password',...verified})).code).toBe(200);
+  await env.db.prepare('UPDATE setting SET receive=0').run();
+  await refresh();
+  const key='attachments/'+await fileUtils.getBuffHash(new TextEncoder().encode('abc'))+'.txt';
+  expect(await acquireObjectLock(env.db,'KV',key,'brief-cleaner',100)).toBe(true);
+  const raw=['From: sender@external.test','To: brief-attachment@example.com','Subject: brief attachment lock',
+    'MIME-Version: 1.0','Content-Type: multipart/mixed; boundary="test-boundary"','',
+    '--test-boundary','Content-Type: text/plain; charset=utf-8','','hello',
+    '--test-boundary','Content-Type: text/plain; name="file.txt"',
+    'Content-Disposition: attachment; filename="file.txt"','Content-Transfer-Encoding: base64','','YWJj',
+    '--test-boundary--',''].join('\r\n');
+  const bytes=new TextEncoder().encode(raw);
+  let rejected=null;
+  const delivery=receiveEmail({from:'sender@external.test',to:'brief-attachment@example.com',raw:new ReadableStream({start(c){c.enqueue(bytes);c.close()}}),setReject(reason){rejected=reason}},env,{});
+  await new Promise(resolve=>setTimeout(resolve,120));
+  expect(await releaseObjectLock(env.db,'KV',key,'brief-cleaner')).toBe(true);
+  await delivery;
+  expect(rejected).toBeNull();
+  const rows=await env.db.prepare("SELECT email_id,status,is_del FROM email WHERE subject='brief attachment lock'").all();
+  expect(rows.results).toHaveLength(1);
+  expect(rows.results[0]).toMatchObject({status:0,is_del:0});
+  expect((await env.db.prepare('SELECT count(*) AS n FROM attachments WHERE email_id=? AND key=?').bind(rows.results[0].email_id,key).first()).n).toBe(1);
+  expect(await env.kv.get(key)).toBe('abc');
 });
 
 it('does not copy a stale on-site attachment reference after its source was deleted', async () => {

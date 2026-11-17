@@ -14,7 +14,7 @@ import { withObjectLocks, recordConfirmedObjectOrigin } from './account-deletion
 
 const attService = {
 
-	async addAtt(c, attachments) {
+	async addAtt(c, attachments, lockOptions) {
 		return this.withAttachmentWriteSafety(c, attachments.map(item => item.key), async (reservation) => {
 			for (let attachment of attachments) {
 				let metadate = {
@@ -30,17 +30,17 @@ const attService = {
 			}
 
 			await orm(c).insert(att).values(attachments).run();
-		});
+		}, lockOptions);
 	},
 
-	async withAttachmentLocks(c, keys, action) {
+	async withAttachmentLocks(c, keys, action, lockOptions) {
 		const storageType = await r2Service.storageType(c);
 		const owner = crypto.randomUUID();
 		return withObjectLocks(c.env.db, storageType, keys, owner, Math.floor(Date.now() / 1000),
-			() => action({owner, storageType}));
+			() => action({owner, storageType}), lockOptions);
 	},
 
-	async withAttachmentWriteSafety(c, keys, action) {
+	async withAttachmentWriteSafety(c, keys, action, lockOptions) {
 		return this.withAttachmentLocks(c, keys, async reservation => {
 			try {
 				return await action(reservation);
@@ -59,7 +59,7 @@ const attService = {
 				}
 				throw error;
 			}
-		});
+		}, lockOptions);
 	},
 
 	async putAttachment(c, reservation, key, content, metadata) {

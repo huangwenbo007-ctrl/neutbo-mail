@@ -97,13 +97,18 @@ export async function releaseObjectLock(db, storageType, key, owner) {
 
 // Prototype: reserve all unique keys in a deterministic order before a writer
 // starts. Contention fails closed and acquired locks are released on failure.
-export async function withObjectLocks(db, storageType, keys, owner, now, operation) {
+export async function withObjectLocks(db, storageType, keys, owner, now, operation, options = {}) {
 	const uniqueKeys = [...new Set(keys)].sort();
 	const acquired = [];
+	let retries = options.retries ?? 0;
+	const delayMs = options.delayMs ?? 0;
+	if (!Number.isSafeInteger(retries) || retries < 0 || retries > 4 ||
+		!Number.isSafeInteger(delayMs) || delayMs < 0 || delayMs > 100) throw new Error('Invalid reservation retry policy');
 	try {
 		for (const key of uniqueKeys) {
-			if (!await acquireObjectLock(db, storageType, key, owner, now)) {
-				throw new Error('Attachment temporarily busy');
+			while (!await acquireObjectLock(db, storageType, key, owner, now)) {
+				if (retries-- <= 0) throw new Error('Attachment temporarily busy');
+				await new Promise(resolve => setTimeout(resolve, delayMs));
 			}
 			acquired.push(key);
 		}
@@ -123,14 +128,14 @@ export async function withObjectLocks(db, storageType, keys, owner, now, operati
 
 // Use a reserved namespace that cannot collide with attachment object keys.
 // This lock is only effective when every account-data writer also uses it.
-export async function withAccountLock(db, userId, operation) {
-	return withAccountLocks(db, [userId], operation);
+export async function withAccountLock(db, userId, operation, options) {
+	return withAccountLocks(db, [userId], operation, options);
 }
 
-export async function withAccountLocks(db, userIds, operation) {
+export async function withAccountLocks(db, userIds, operation, options) {
 	const ids = userIds.map(Number);
 	if (!ids.length || ids.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('Invalid account identifier');
-	return withObjectLocks(db, 'KV', ids.map(id => `internal/account/${id}`), crypto.randomUUID(), Math.floor(Date.now() / 1000), operation);
+	return withObjectLocks(db, 'KV', ids.map(id => `internal/account/${id}`), crypto.randomUUID(), Math.floor(Date.now() / 1000), operation, options);
 }
 
 // Prototype only. Call while holding the object reservation, after a trusted
