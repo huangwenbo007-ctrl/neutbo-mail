@@ -8,8 +8,8 @@ export function oauthGithubLogin(code, redirectUri) {
     return http.post('/oauth/github/login',{code, redirectUri})
 }
 
-export function oauthGoogleLogin(code, redirectUri) {
-    return http.post('/oauth/google/login',{code, redirectUri})
+export function oauthGoogleLogin(code, redirectUri, codeVerifier) {
+    return http.post('/oauth/google/login',{code, redirectUri, codeVerifier})
 }
 
 export function oauthBindUser(form) {

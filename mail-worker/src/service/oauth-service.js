@@ -1,35 +1,32 @@
 import BizError from "../error/biz-error";
 import orm from "../entity/orm";
 import {oauth} from "../entity/oauth";
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import userService from "./user-service";
 import loginService from "./login-service";
-import cryptoUtils from "../utils/crypto-utils";
 import settingService from "./setting-service";
 import {t} from '../i18n/i18n';
+import {sign, verify} from 'hono/jwt';
 
 const oauthService = {
 
 	async bindUser(c, params) {
 
-		const { email, oauthUserId, code, externalEmail, emailChallenge, emailVerificationCode } = params;
-
-		const oauthRow = await this.getById(c, oauthUserId);
-
-		let userRow = await userService.selectByIdIncludeDel(c, oauthRow.userId);
-
-		if (userRow) {
-			throw new BizError('用户已绑定有邮箱')
+		const { email, code, token, externalEmail, emailChallenge, emailVerificationCode, bindToken } = params;
+		let proof;
+		try {
+			if (typeof bindToken !== 'string' || !c.env.jwt_secret) throw new Error('missing binding proof');
+			proof = await verify(bindToken, c.env.jwt_secret + ':oauth-registration:v1', 'HS256');
+			if (proof.purpose !== 'oauth-registration' || !Number.isSafeInteger(proof.oauthId) || !proof.exp || !['google', 'github', 'linuxdo'].includes(proof.platform)) throw new Error('invalid binding proof');
+		} catch {
+			throw new BizError('第三方登录已失效，请重新登录');
 		}
-
-		await loginService.register(c, { email, password: cryptoUtils.genRandomPwd(), code, externalEmail, emailChallenge, emailVerificationCode }, true);
-
-		userRow = await userService.selectByEmail(c, email);
-
-		orm(c).update(oauth).set({ userId: userRow.userId }).where(eq(oauth.oauthUserId, oauthUserId)).run();
+		this.assertEnabled(await settingService.query(c), proof.platform + 'Switch');
+		const randomPassword = crypto.randomUUID().replace(/-/g, '').slice(0, 24);
+		await loginService.register(c, { email, password: randomPassword, code, token, externalEmail, emailChallenge, emailVerificationCode },
+			{ oauthId: proof.oauthId, platform: proof.platform });
 		const jwtToken = await loginService.login(c, { email, password: null }, true);
-
-		return { userInfo: oauthRow, token: jwtToken}
+		return { token: jwtToken };
 	},
 
 	async linuxDoLogin(c, params) {
@@ -134,7 +131,8 @@ const oauthService = {
 
 	async googleLogin(c, params) {
 
-		const { code, redirectUri } = params;
+		const { code, redirectUri, codeVerifier } = params;
+		if (typeof codeVerifier !== 'string' || !/^[0-9a-f]{64}$/.test(codeVerifier)) throw new BizError('登录请求已失效，请重新登录');
 
 		const setting = await settingService.query(c);
 		this.assertEnabled(setting, 'googleSwitch');
@@ -145,6 +143,7 @@ const oauthService = {
 		reqParams.append('code', code)
 		reqParams.append('redirect_uri', redirectUri)
 		reqParams.append('grant_type', 'authorization_code')
+		reqParams.append('code_verifier', codeVerifier)
 
 		const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
 			method: "POST",
@@ -170,6 +169,7 @@ const oauthService = {
 
 		const userInfo = await userRes.json();
 
+		if (typeof userInfo.sub !== 'string' || !userInfo.sub) throw new BizError('无法确认 Google 账号身份');
 		userInfo.oauthUserId = String(userInfo.sub);
 		userInfo.username = userInfo.email;
 		userInfo.name = userInfo.name;
@@ -182,10 +182,13 @@ const oauthService = {
 	async saveAndLogin(c, userInfo) {
 
 		const oauthRow = await this.saveUser(c, userInfo);
+		if (oauthRow.userId === -1) throw new BizError('第三方账号正在处理中，请稍后重试');
 		const userRow = await userService.selectByIdIncludeDel(c, oauthRow.userId);
 
 		if (!userRow) {
-			return { userInfo: oauthRow, token: null };
+			if (oauthRow.userId !== 0 || !c.env.jwt_secret) throw new BizError('第三方账号状态异常');
+			const bindToken = await sign({ purpose: 'oauth-registration', oauthId: oauthRow.oauthId, platform: oauthRow.platform, exp: Math.floor(Date.now() / 1000) + 600 }, c.env.jwt_secret + ':oauth-registration:v1', 'HS256');
+			return { userInfo: oauthRow, token: null, bindToken };
 		}
 
 		const JwtToken = await loginService.login(c, { email: userRow.email, password: null }, true);
@@ -193,14 +196,16 @@ const oauthService = {
 	},
 
 	async saveUser(c, userInfo) {
-
-		const userInfoRow = await this.getById(c, userInfo.oauthUserId);
-
-		if (!userInfoRow) {
-			return await orm(c).insert(oauth).values(userInfo).returning().get();
-		} else {
-			return await orm(c).update(oauth).set(userInfo).where(eq(oauth.oauthUserId, userInfo.oauthUserId)).returning().get();
-		}
+		const { oauthUserId, platform } = userInfo;
+		const profile = { username: userInfo.username || '', name: userInfo.name || '', avatar: userInfo.avatar || '',
+			active: userInfo.active ?? null, trustLevel: userInfo.trustLevel ?? null, silenced: userInfo.silenced ?? null };
+		// One SQL statement prevents simultaneous first logins from creating duplicate identities.
+		await c.env.db.prepare(`INSERT INTO oauth (oauth_user_id, platform, username, name, avatar, active, trust_level, silenced)
+			SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM oauth WHERE oauth_user_id = ? AND platform = ?)`)
+			.bind(oauthUserId, platform, profile.username, profile.name, profile.avatar, profile.active, profile.trustLevel, profile.silenced, oauthUserId, platform).run();
+		const rows = await orm(c).select().from(oauth).where(and(eq(oauth.oauthUserId, oauthUserId), eq(oauth.platform, platform))).all();
+		if (rows.length !== 1) throw new BizError('第三方账号状态异常，请联系管理员');
+		return await orm(c).update(oauth).set(profile).where(eq(oauth.oauthId, rows[0].oauthId)).returning().get();
 
 	},
 
@@ -208,10 +213,6 @@ const oauthService = {
 		if (setting[switchKey] !== 0) {
 			throw new BizError(t('oauthDisabled'));
 		}
-	},
-
-	async getById(c, oauthUserId) {
-		return await orm(c).select().from(oauth).where(eq(oauth.oauthUserId, oauthUserId)).get();
 	},
 
 	async deleteByUserId(c, userId) {
