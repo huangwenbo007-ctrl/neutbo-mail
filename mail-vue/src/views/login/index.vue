@@ -133,9 +133,13 @@
         </div>
       </div>
     </div>
-    <el-dialog class="bind-dialog" v-model="showBindForm" title="注册邮箱" @closed="resetBindTurnstile">
+    <el-dialog class="neutbo-bind-dialog" v-model="showBindForm" title="注册邮箱" align-center @closed="resetBindTurnstile">
+      <template #header="{ titleId, titleClass }">
+        <div class="neutbo-dialog-brand"><img :src="brandLogo" alt="" /><span>Neutbo Mail</span></div>
+        <h2 :id="titleId" :class="titleClass">创建你的邮箱</h2>
+      </template>
       <div class="bind-container">
-        <p>已为你建议邮箱地址，可以修改后继续。</p>
+        <p class="neutbo-dialog-description">已为你建议邮箱地址，可以修改后继续。</p>
         <el-input :class="!hideLoginDomain ? 'email-input' : ''" v-model="bindForm.email" type="text" :placeholder="$t('emailAccount')" autocomplete="off" @keyup.enter="bind">
           <template #append v-if="!hideLoginDomain">
             <div @click.stop="openSelect">
@@ -163,14 +167,14 @@
                   type="text" autocomplete="off" @keyup.enter="bind"/>
         <el-input v-if="settingStore.settings.regKey === 2" v-model="bindForm.code"
                   :placeholder="$t('regKeyOptional')" type="text" autocomplete="off" @keyup.enter="bind"/>
-        <p v-if="verifiedGoogleEmail">已使用 Google 验证邮箱：{{ verifiedGoogleEmail }}</p>
+        <p v-if="verifiedGoogleEmail" class="neutbo-verified-email">已使用 Google 验证邮箱<br><strong>{{ verifiedGoogleEmail }}</strong></p>
         <el-input v-if="!verifiedGoogleEmail" v-model="verification.externalEmail" :placeholder="$t('externalEmailHint')" autocomplete="email"/>
         <el-input v-if="!verifiedGoogleEmail" v-model="verification.emailVerificationCode" placeholder="6 位邮箱验证码" maxlength="6" inputmode="numeric">
           <template #append><el-button :disabled="sendCountdown > 0 || sendingCode" @click="sendCode">{{ sendCountdown ? `${sendCountdown} 秒后重发` : '发送验证码' }}</el-button></template>
         </el-input>
         <div v-if="bindTurnstileShown" ref="bindTurnstileContainer" class="bind-turnstile"></div>
         <el-button class="btn" type="primary" @click="bind" :loading="bindLoading"
-        >绑定
+        >创建并绑定
         </el-button>
       </div>
     </el-dialog>
@@ -791,6 +795,32 @@ function submitRegister() {
 }
 
 html.dark .intro-brand img, html.dark .form-brand img { filter: brightness(0) invert(1); }
+
+.neutbo-bind-dialog.el-dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 32px;
+  border: 1px solid var(--mail-card-border, #e0e8f3);
+  border-radius: 24px;
+  box-shadow: 0 22px 64px rgba(36, 63, 102, .2);
+}
+.neutbo-bind-dialog .el-dialog__header { padding: 0; margin: 0 0 22px; }
+.neutbo-bind-dialog .el-dialog__headerbtn { top: 20px; right: 20px; }
+.neutbo-dialog-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; color: var(--el-text-color-primary); font-weight: 700; font-size: 15px; }
+.neutbo-dialog-brand img { width: 32px; height: 32px; object-fit: contain; }
+.neutbo-bind-dialog .el-dialog__title { display: block; color: var(--el-text-color-primary); font-size: 24px; line-height: 1.25; font-weight: 700; letter-spacing: -.03em; margin: 0; }
+.neutbo-bind-dialog .bind-container { display: grid; gap: 16px; }
+.neutbo-dialog-description { color: var(--el-text-color-secondary); margin: 0; line-height: 1.6; }
+.neutbo-bind-dialog .el-input { min-height: 44px; }
+.neutbo-bind-dialog .el-input__wrapper { border-radius: 10px; }
+.neutbo-bind-dialog .el-input-group__append { border-radius: 0 10px 10px 0; }
+.neutbo-bind-dialog .email-input .el-input__wrapper { border-radius: 10px 0 0 10px; }
+.neutbo-verified-email { margin: 0; padding: 12px 14px; border: 1px solid #d6e5fa; border-radius: 12px; background: #f3f8ff; color: #58708e; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.neutbo-verified-email strong { color: #1e3656; font-weight: 600; }
+.neutbo-bind-dialog .btn { width: 100%; height: 44px; border-radius: 10px; font-weight: 600; }
+html.dark .neutbo-dialog-brand img { filter: brightness(0) invert(1); }
+html.dark .neutbo-verified-email { background: #1c2b3d; border-color: #344d68; color: #b2c3d9; }
+html.dark .neutbo-verified-email strong { color: #e5efff; }
+@media (max-width: 480px) { .neutbo-bind-dialog.el-dialog { padding: 26px 22px; border-radius: 18px; } }
 </style>
 
 <style lang="scss" scoped>
@@ -887,15 +917,6 @@ html.dark .intro-brand img, html.dark .form-brand img { filter: brightness(0) in
 
 :deep(.el-select-dropdown__item) {
   padding: 0 10px;
-}
-
-:deep(.bind-dialog) {
-  width: 400px !important;
-  @media (max-width: 440px) {
-    width: calc(100% - 40px) !important;
-    margin-right: 20px !important;
-    margin-left: 20px !important;
-  }
 }
 
 .bind-container {
