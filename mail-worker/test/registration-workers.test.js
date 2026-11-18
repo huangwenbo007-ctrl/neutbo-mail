@@ -2,6 +2,7 @@ import { SELF, env, fetchMock } from 'cloudflare:test';
 import { beforeEach, afterEach, expect, it } from 'vitest';
 import settingService from '../src/service/setting-service';
 import { sign } from 'hono/jwt';
+import worker from '../src/index';
 
 beforeEach(async () => {
   fetchMock.activate();
@@ -34,6 +35,24 @@ async function proof(address = 'receiver@external.test') {
   expect(result.code).toBe(200);
   return {externalEmail:address, emailChallenge:result.data.challenge, emailVerificationCode:sentCode};
 }
+
+it('serves the public home at root and preserves mailbox and other methods', async () => {
+  const requests = [];
+  const assets = { fetch: async request => {
+    requests.push({path: new URL(request.url).pathname, method: request.method});
+    return new Response('asset');
+  }};
+  await worker.fetch(new Request('https://local.test/'), {assets}, {});
+  await worker.fetch(new Request('https://local.test/', {method:'HEAD'}), {assets}, {});
+  await worker.fetch(new Request('https://local.test/login'), {assets}, {});
+  await worker.fetch(new Request('https://local.test/', {method:'POST'}), {assets}, {});
+  expect(requests).toEqual([
+    {path:'/about', method:'GET'},
+    {path:'/about', method:'HEAD'},
+    {path:'/login', method:'GET'},
+    {path:'/', method:'POST'},
+  ]);
+});
 
 it('initializes the verification schema and rejects registration without email proof', async () => {
   const response = await SELF.fetch('https://local.test/api/register', {

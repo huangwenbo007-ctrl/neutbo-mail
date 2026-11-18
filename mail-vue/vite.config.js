@@ -21,6 +21,7 @@ export default defineConfig(({mode}) => {
                 manifest: {
                     name: env.VITE_PWA_NAME,
                     short_name: env.VITE_PWA_NAME,
+                    start_url: '/login',
                     background_color: '#FFFFFF',
                     theme_color: '#FFFFFF',
                     icons: [

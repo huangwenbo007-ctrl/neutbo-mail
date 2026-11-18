@@ -12,6 +12,12 @@ export default {
 
 		const url = new URL(req.url)
 
+		// The public landing page is the website homepage; the mailbox remains at /login.
+		if (url.pathname === '/' && (req.method === 'GET' || req.method === 'HEAD')) {
+			url.pathname = '/about';
+			return env.assets.fetch(new Request(url.toString(), req));
+		}
+
 		if (url.pathname.startsWith('/api/')) {
 			url.pathname = url.pathname.replace('/api', '')
 			req = new Request(url.toString(), req)
