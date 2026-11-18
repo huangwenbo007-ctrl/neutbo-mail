@@ -88,22 +88,23 @@ it.each([
   expect(result.data).toBeUndefined();
 });
 
-async function googleLogin(subject = 'google-test-user') {
+async function googleLogin(subject = 'google-test-user', overrides = {}) {
   fetchMock.get('https://oauth2.googleapis.com').intercept({path:'/token', method:'POST'}).reply(200, options => {
     expect(new URLSearchParams(options.body).get('code_verifier')).toBe('a'.repeat(64));
     return JSON.stringify({access_token:'mock-google-access-token'});
   });
-  fetchMock.get('https://openidconnect.googleapis.com').intercept({path:'/v1/userinfo', method:'GET'}).reply(200, JSON.stringify({sub:subject, email:'person@gmail.com', email_verified:true, name:'Test'}));
+  fetchMock.get('https://openidconnect.googleapis.com').intercept({path:'/v1/userinfo', method:'GET'}).reply(200, JSON.stringify({sub:subject, email:'person@gmail.com', email_verified:true, name:'Test', ...overrides}));
   return post('/oauth/google/login', {code:'mock-auth-code',redirectUri:'https://local.test/login',codeVerifier:'a'.repeat(64)});
 }
 
-it('requires Google binding proof and external email verification, and supports subsequent login', async () => {
+it('accepts a verified Google email without an extra code and supports subsequent login', async () => {
   await env.db.prepare("UPDATE setting SET google_switch=0, google_client_id='test-client', google_client_secret='test-secret'").run();
   await refresh();
   const oauth = await googleLogin();
   expect(oauth.code).toBe(200);
   expect(oauth.data.token).toBeNull();
   expect(typeof oauth.data.bindToken).toBe('string');
+  expect(oauth.data.verifiedGoogleEmail).toBe('person@gmail.com');
   const params = {email:'oauth@example.com', oauthUserId:'google-test-user'};
   const bind = async (body) => {
     const response = await SELF.fetch('https://local.test/api/oauth/bindUser', {
@@ -115,18 +116,33 @@ it('requires Google binding proof and external email verification, and supports 
   expect((await bind({...params, bindToken:'fake'})).code).not.toBe(200);
   const expired = await sign({purpose:'oauth-registration',oauthId:oauth.data.userInfo.oauthId,platform:'google',exp:Math.floor(Date.now()/1000)-1},env.jwt_secret+':oauth-registration:v1','HS256');
   expect((await bind({...params,bindToken:expired})).code).not.toBe(200);
-  expect((await bind({...params, bindToken:oauth.data.bindToken})).code).not.toBe(200);
+  const legacy = await sign({purpose:'oauth-registration',oauthId:oauth.data.userInfo.oauthId,platform:'google',exp:Math.floor(Date.now()/1000)+300},env.jwt_secret+':oauth-registration:v1','HS256');
+  expect((await bind({...params, bindToken:legacy, verifiedGoogleEmail:'forged@gmail.com'})).code).not.toBe(200);
   expect((await env.db.prepare("SELECT count(*) AS n FROM user WHERE email='oauth@example.com'").first()).n).toBe(0);
-  const verified = await proof();
-  const bound = await bind({...params,bindToken:oauth.data.bindToken,...verified});
+  const bound = await bind({...params,bindToken:oauth.data.bindToken,externalEmail:'forged@other.test'});
   expect(bound.code).toBe(200);
   expect(typeof bound.data.token).toBe('string');
-  expect((await bind({...params,bindToken:oauth.data.bindToken,...verified})).code).not.toBe(200);
+  expect((await env.db.prepare("SELECT username FROM oauth WHERE oauth_user_id='google-test-user'").first()).username).toBe('person@gmail.com');
+  expect((await bind({...params,bindToken:oauth.data.bindToken})).code).not.toBe(200);
   await env.db.prepare('UPDATE setting SET register=1').run();
   await refresh();
   const later = await googleLogin();
   expect(later.code).toBe(200);
   expect(typeof later.data.token).toBe('string');
+});
+
+it.each([
+  { email_verified: false },
+  { email_verified: 'true' },
+  { email: '' },
+  { email: 'person@example.com' },
+])('rejects unverified or non-external Google email: %j', async overrides => {
+  await env.db.prepare("UPDATE setting SET google_switch=0, google_client_id='test-client', google_client_secret='test-secret'").run();
+  await refresh();
+  const result = await googleLogin('invalid-google', overrides);
+  expect(result.code).not.toBe(200);
+  expect(result.data?.bindToken).toBeUndefined();
+  expect((await env.db.prepare("SELECT count(*) AS n FROM user WHERE email='invalid@example.com'").first()).n).toBe(0);
 });
 
 it('rejects Google code exchange without PKCE and does not confuse provider identities', async () => {

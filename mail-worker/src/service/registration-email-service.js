@@ -13,7 +13,7 @@ async function mac(secret, value) {
 	return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function externalEmail(value, domains) {
+export function externalEmail(value, domains) {
 	if (typeof value !== 'string') throw new BizError('请输入有效的外部邮箱');
 	const email = value.trim().toLowerCase();
 	if (email.length > 254 || !verifyUtils.isEmail(email) || /[\r\n]/.test(email)) throw new BizError('请输入有效的外部邮箱');
