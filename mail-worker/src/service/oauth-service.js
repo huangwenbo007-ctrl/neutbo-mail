@@ -6,6 +6,7 @@ import userService from "./user-service";
 import loginService from "./login-service";
 import settingService from "./setting-service";
 import {googleCredentials} from "./google-credentials";
+import {externalEmail as normalizeExternalEmail} from "./registration-email-service";
 import {t} from '../i18n/i18n';
 import {sign, verify} from 'hono/jwt';
 
@@ -23,9 +24,14 @@ const oauthService = {
 			throw new BizError('第三方登录已失效，请重新登录');
 		}
 		this.assertEnabled(await settingService.query(c), proof.platform + 'Switch');
+		let verifiedGoogleEmail;
+		if (proof.platform === 'google' && proof.googleEmail) {
+			const domains = Array.isArray(c.env.domain) ? c.env.domain : JSON.parse(c.env.domain);
+			verifiedGoogleEmail = normalizeExternalEmail(proof.googleEmail, domains);
+		}
 		const randomPassword = crypto.randomUUID().replace(/-/g, '').slice(0, 24);
 		await loginService.register(c, { email, password: randomPassword, code, token, externalEmail, emailChallenge, emailVerificationCode },
-			{ oauthId: proof.oauthId, platform: proof.platform });
+			{ oauthId: proof.oauthId, platform: proof.platform, verifiedGoogleEmail });
 		const jwtToken = await loginService.login(c, { email, password: null }, true);
 		return { token: jwtToken };
 	},
@@ -190,8 +196,14 @@ const oauthService = {
 
 		if (!userRow) {
 			if (oauthRow.userId !== 0 || !c.env.jwt_secret) throw new BizError('第三方账号状态异常');
-			const bindToken = await sign({ purpose: 'oauth-registration', oauthId: oauthRow.oauthId, platform: oauthRow.platform, exp: Math.floor(Date.now() / 1000) + 600 }, c.env.jwt_secret + ':oauth-registration:v1', 'HS256');
-			return { userInfo: oauthRow, token: null, bindToken };
+			let verifiedGoogleEmail;
+			if (userInfo.platform === 'google') {
+				if (userInfo.email_verified !== true) throw new BizError('Google 邮箱尚未验证');
+				const domains = Array.isArray(c.env.domain) ? c.env.domain : JSON.parse(c.env.domain);
+				verifiedGoogleEmail = normalizeExternalEmail(userInfo.email, domains);
+			}
+			const bindToken = await sign({ purpose: 'oauth-registration', oauthId: oauthRow.oauthId, platform: oauthRow.platform, ...(verifiedGoogleEmail ? {googleEmail: verifiedGoogleEmail} : {}), exp: Math.floor(Date.now() / 1000) + 600 }, c.env.jwt_secret + ':oauth-registration:v1', 'HS256');
+			return { userInfo: oauthRow, token: null, bindToken, verifiedGoogleEmail };
 		}
 
 		const JwtToken = await loginService.login(c, { email: userRow.email, password: null }, true);

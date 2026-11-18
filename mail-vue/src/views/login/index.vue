@@ -163,8 +163,9 @@
                   type="text" autocomplete="off" @keyup.enter="bind"/>
         <el-input v-if="settingStore.settings.regKey === 2" v-model="bindForm.code"
                   :placeholder="$t('regKeyOptional')" type="text" autocomplete="off" @keyup.enter="bind"/>
-        <el-input v-model="verification.externalEmail" :placeholder="$t('externalEmailHint')" autocomplete="email"/>
-        <el-input v-model="verification.emailVerificationCode" placeholder="6 位邮箱验证码" maxlength="6" inputmode="numeric">
+        <p v-if="verifiedGoogleEmail">已使用 Google 验证邮箱：{{ verifiedGoogleEmail }}</p>
+        <el-input v-if="!verifiedGoogleEmail" v-model="verification.externalEmail" :placeholder="$t('externalEmailHint')" autocomplete="email"/>
+        <el-input v-if="!verifiedGoogleEmail" v-model="verification.emailVerificationCode" placeholder="6 位邮箱验证码" maxlength="6" inputmode="numeric">
           <template #append><el-button :disabled="sendCountdown > 0 || sendingCode" @click="sendCode">{{ sendCountdown ? `${sendCountdown} 秒后重发` : '发送验证码' }}</el-button></template>
         </el-input>
         <div v-if="bindTurnstileShown" ref="bindTurnstileContainer" class="bind-turnstile"></div>
@@ -206,6 +207,7 @@ const loginLoading = ref(false)
 const bindLoading = ref(false)
 const oauthLoading = ref(false);
 const showBindForm = ref(false);
+const verifiedGoogleEmail = ref('');
 const show = ref('login')
 
 const verification = reactive({externalEmail: '', emailVerificationCode: '', emailChallenge: ''})
@@ -420,6 +422,7 @@ async function oauthGetUser() {
     if (!data.token) {
       if (!data.bindToken) throw new Error('Missing binding proof')
       bindForm.bindToken = data.bindToken
+      verifiedGoogleEmail.value = provider === 'google' && typeof data.verifiedGoogleEmail === 'string' ? data.verifiedGoogleEmail : ''
       const source = String(data.userInfo?.username || '').split('@')[0].toLowerCase()
       const safe = source.replace(/[^a-z0-9._-]/g, '').replace(/^[._-]+|[._-]+$/g, '') || 'user'
       const random = Array.from(crypto.getRandomValues(new Uint8Array(3)), b => b.toString(16).padStart(2, '0')).join('')
@@ -517,7 +520,7 @@ async function bind() {
 
   }
 
-  const verify = verificationParams()
+  const verify = verifiedGoogleEmail.value ? {} : verificationParams()
   if (!verify) return
   const needsTurnstile = settingStore.settings.registerVerify === 0 || (settingStore.settings.registerVerify === 2 && settingStore.settings.regVerifyOpen)
   if (needsTurnstile && !bindTurnstileToken) {

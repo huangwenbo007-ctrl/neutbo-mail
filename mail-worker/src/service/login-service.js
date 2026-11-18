@@ -123,7 +123,10 @@ const loginService = {
 		}
 
 		const { salt, hash } = await saltHashUtils.hashPassword(password);
-		await registrationEmailService.consume(c, params);
+		// Only a server-verified Google binding proof can supply this internal field.
+		if (!(oauthBinding?.platform === 'google' && oauthBinding.verifiedGoogleEmail)) {
+			await registrationEmailService.consume(c, params);
+		}
 
 		let consumedCode = null
 		const usingRegKey = regKey !== settingConst.regKey.CLOSE && type
