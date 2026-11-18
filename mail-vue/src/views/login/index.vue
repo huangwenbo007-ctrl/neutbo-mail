@@ -128,7 +128,7 @@
           </div>
         </template>
         <div class="public-info-links">
-          <a href="/about.html">关于 Neutbo Mail</a>
+          <a href="/">关于 Neutbo Mail</a>
           <a href="/privacy.html">隐私政策</a>
         </div>
       </div>
